@@ -1,24 +1,24 @@
+/**
+ * Send a chat completion to an OpenAI-compatible endpoint.
+ *
+ * The browser can't call NVIDIA NIM or OpenCode Zen directly (no CORS), so
+ * we forward every request through the same-origin Vercel serverless
+ * proxy at `/api/chat`. The proxy:
+ *   - accepts the user's `Authorization: Bearer <apiKey>` header
+ *   - forwards it to the upstream provider
+ *   - returns the response verbatim
+ *
+ * Per-model settings (URL, model name, timeout, max tokens, reasoning
+ * effort) are documented in `src/lib/models.ts`.
+ */
 import { MODELS } from './models';
 import type {
   ChatMessage,
   ChatOptions,
   ChatResponse,
-  ModelConfig,
   ModelId,
 } from './types';
 
-/**
- * Send a chat completion to an OpenAI-compatible endpoint.
- *
- * Supports two providers out of the box:
- *   - NVIDIA NIM (openai/gpt-oss-120b) — 120s timeout
- *   - OpenCode Zen (glm-5.1, with reasoning disabled) — 50s timeout
- *     (matches ax-opencode-translator/src/lib/llm-client.ts so the
- *     behavior is identical to the canonical implementation)
- *
- * Falls back to `reasoning_content` for reasoning models that return
- * an empty `content` field.
- */
 export async function chatCompletion(
   modelId: ModelId,
   apiKey: string,
@@ -31,34 +31,25 @@ export async function chatCompletion(
   const timeoutMs = config.timeoutMs;
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-  const body: Record<string, unknown> = {
-    model: config.model,
-    messages,
-    max_tokens: options.maxTokens ?? config.defaultMaxTokens,
-    temperature: options.temperature ?? 0.3,
-    stream: false,
-  };
-
-  if (config.reasoningEffort) {
-    // Reasoning models: send the provider-accepted effort value.
-    // OpenCode Zen accepts 'none' (disables CoT entirely).
-    // NVIDIA NIM accepts only 'low' | 'medium' | 'high' — 'low' minimizes CoT.
-    body.reasoning_effort = config.reasoningEffort;
-  }
-
   try {
-    const response = await fetch(config.baseUrl, {
+    const response = await fetch('/api/chat', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        model: modelId,
+        messages,
+        maxTokens: options.maxTokens,
+        temperature: options.temperature ?? 0.3,
+        reasoningEffort: config.reasoningEffort,
+      }),
       signal: controller.signal,
     });
 
     if (!response.ok) {
-      throw await toApiError(response, config);
+      throw await toProxyError(response);
     }
 
     const data = (await response.json()) as {
@@ -96,13 +87,13 @@ export async function chatCompletion(
   }
 }
 
-async function toApiError(response: Response, config: ModelConfig): Promise<Error> {
+async function toProxyError(response: Response): Promise<Error> {
   let detail = '';
   try {
     const text = await response.text();
     try {
-      const parsed = JSON.parse(text) as { error?: { message?: string }; message?: string };
-      detail = parsed.error?.message || parsed.message || text;
+      const parsed = JSON.parse(text) as { error?: { message?: string }; message?: string; detail?: string };
+      detail = parsed.error?.message || parsed.message || parsed.detail || text;
     } catch {
       detail = text;
     }
@@ -111,31 +102,27 @@ async function toApiError(response: Response, config: ModelConfig): Promise<Erro
   }
 
   if (response.status === 401) {
-    return new Error(`Invalid API key for ${config.name}. Double-check the key in the config bar.`);
+    return new Error(`Invalid or missing API key. ${detail || 'Check the key in the config bar.'}`);
   }
   if (response.status === 403) {
-    return new Error(`Access denied by ${config.name} — your key may not be allowed to call ${config.model}.`);
+    return new Error(`Access denied. ${detail || 'Your key may not be allowed for this model.'}`);
   }
   if (response.status === 404) {
-    return new Error(`${config.name} could not find model "${config.model}". It may have been renamed or retired.`);
+    return new Error(`Model not found. ${detail || 'It may have been renamed or retired.'}`);
   }
   if (response.status === 429) {
-    return new Error(`${config.name} rate-limited the request. Wait a moment and try again.`);
+    return new Error(`Rate limited. ${detail || 'Wait a moment and try again.'}`);
   }
   if (response.status >= 500) {
-    return new Error(`${config.name} server error (${response.status}): ${detail || 'no body'}. Usually temporary.`);
+    return new Error(`Server error (${response.status}): ${detail || 'no body'}. Usually temporary.`);
   }
-  return new Error(`${config.name} API error (${response.status}): ${detail || 'no body'}`);
+  return new Error(`API error (${response.status}): ${detail || 'no body'}`);
 }
 
 interface LinkedSignals {
   readonly dispose: () => void;
 }
 
-/**
- * Combine a parent AbortSignal with our internal timeout/controller so
- * either side can cancel the in-flight fetch.
- */
 function linkSignals(controller: AbortController, parent?: AbortSignal): LinkedSignals {
   if (!parent) {
     return { dispose: () => undefined };
