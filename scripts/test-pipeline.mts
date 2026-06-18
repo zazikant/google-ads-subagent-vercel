@@ -2,7 +2,7 @@
  * Full pipeline integration test — runs intent → copy → validate → (refine → validate)*
  * with real keys. Exercises the new AX DSPy-style state machine.
  */
-import { runPipeline } from '../src/lib/pipeline.ts';
+import { runPipeline } from '../lib/pipeline.ts';
 
 const PRODUCT = 'Cloud project management software for remote teams. Real-time collaboration, Gantt charts, time tracking. From $12 per user per month.';
 const AUDIENCE = 'Startup founders at SMBs (5-50 employees)';

@@ -1,15 +1,13 @@
 /**
  * Send a chat completion to an OpenAI-compatible endpoint.
  *
- * The browser can't call NVIDIA NIM or OpenCode Zen directly (no CORS), so
- * we forward every request through the same-origin Vercel serverless
- * proxy at `/api/chat`. The proxy:
- *   - accepts the user's `Authorization: Bearer <apiKey>` header
- *   - forwards it to the upstream provider
- *   - returns the response verbatim
+ * Called from the browser; uses fetch() to the same-origin Next.js
+ * route at `/api/chat` which then forwards to the upstream provider.
+ * The provider's CORS headers don't matter to the browser because
+ * requests go same-origin first.
  *
  * Per-model settings (URL, model name, timeout, max tokens, reasoning
- * effort) are documented in `src/lib/models.ts`.
+ * effort) live in `src/lib/models.ts`.
  */
 import { MODELS } from './models';
 import type {

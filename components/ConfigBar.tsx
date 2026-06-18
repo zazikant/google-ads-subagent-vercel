@@ -11,7 +11,7 @@ interface ConfigBarProps {
   readonly onApiKeyKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void;
   readonly onClear: () => void;
   readonly keyCommitted: boolean;
-  readonly apiKeyInputRef: React.RefObject<HTMLInputElement | null>;
+  readonly apiKeyInputRef: React.RefObject<HTMLInputElement>;
 }
 
 export function ConfigBar({

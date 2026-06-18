@@ -1,3 +1,5 @@
+'use client';
+
 import { useState } from 'react';
 import { Badge } from './PhaseTracker';
 import type { AdResult } from '../lib/types';
@@ -23,7 +25,6 @@ export function AdResultView({ ad }: AdResultProps) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Fallback for environments without clipboard API
       const ta = document.createElement('textarea');
       ta.value = t;
       document.body.appendChild(ta);
@@ -37,7 +38,6 @@ export function AdResultView({ ad }: AdResultProps) {
 
   return (
     <div className="ad-result">
-      {/* Google-style preview */}
       <div className="ad-preview">
         <div className="ad-preview-head">
           <div
@@ -60,7 +60,6 @@ export function AdResultView({ ad }: AdResultProps) {
         ))}
       </div>
 
-      {/* Data */}
       <div className="ad-data">
         <p className="ad-section-title">Headlines</p>
         {ad.headlines.map((h, i) => (

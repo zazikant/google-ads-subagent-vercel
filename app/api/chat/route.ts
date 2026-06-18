@@ -3,10 +3,14 @@
  *
  * The browser can't call NVIDIA NIM or OpenCode Zen directly because those
  * endpoints don't return CORS headers. This proxy accepts a chat completion
- * request from the same-origin frontend and forwards it server-side.
+ * request from the same-origin Next.js frontend and forwards it server-side.
  *
  * The user's API key travels in the `Authorization: Bearer` header of this
  * request and is forwarded upstream as-is. Nothing is stored.
+ *
+ * Implements the EXACT request shape used by:
+ *   - D:\test\ax-translator\src\lib\nvidia-client.ts   (NVIDIA, 120s timeout)
+ *   - D:\test\ax-opencode-translator\src\lib\llm-client.ts  (OpenCode, 50s, reasoning_effort="none")
  */
 
 interface ChatRequest {
@@ -21,6 +25,8 @@ interface ProviderConfig {
   readonly baseUrl: string;
   readonly model: string;
   readonly defaultMaxTokens: number;
+  readonly reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
+  readonly acceptsReasoningNone: boolean;
 }
 
 const PROVIDERS: Record<ChatRequest['model'], ProviderConfig> = {
@@ -28,17 +34,23 @@ const PROVIDERS: Record<ChatRequest['model'], ProviderConfig> = {
     baseUrl: 'https://integrate.api.nvidia.com/v1/chat/completions',
     model: 'openai/gpt-oss-120b',
     defaultMaxTokens: 2048,
+    // NVIDIA gateway rejects 'none' — valid values: 'low' | 'medium' | 'high'
+    reasoningEffort: 'low',
+    acceptsReasoningNone: false,
   },
   'opencode-glm-5.1': {
     baseUrl: 'https://opencode.ai/zen/go/v1/chat/completions',
     model: 'glm-5.1',
     defaultMaxTokens: 4096,
+    // OpenCode Zen accepts 'none' (must be string, not int)
+    reasoningEffort: 'none',
+    acceptsReasoningNone: true,
   },
 };
 
 const ALLOWED_MODELS = new Set(Object.keys(PROVIDERS));
 
-export default async function handler(req: Request): Promise<Response> {
+export async function POST(req: Request): Promise<Response> {
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
       status: 405,
@@ -92,8 +104,8 @@ export default async function handler(req: Request): Promise<Response> {
     temperature: body.temperature ?? 0.3,
     stream: false,
   };
-  if (body.reasoningEffort) {
-    upstreamBody.reasoning_effort = body.reasoningEffort;
+  if (config.reasoningEffort) {
+    upstreamBody.reasoning_effort = config.reasoningEffort;
   }
 
   try {

@@ -2,7 +2,7 @@
  * Live integration test — exercises both providers end-to-end with real keys.
  * Reads keys from env so they never touch the repo.
  */
-import { chatCompletion } from '../src/lib/llmClient.ts';
+import { chatCompletion } from '../lib/llmClient.ts';
 
 interface TestResult {
   provider: string;

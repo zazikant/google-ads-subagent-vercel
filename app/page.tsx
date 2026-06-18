@@ -1,17 +1,18 @@
+'use client';
+
 import { useMemo, useRef, useState } from 'react';
-import { AdResultView } from './components/AdResult';
-import { ConfigBar } from './components/ConfigBar';
-import { PhaseTracker } from './components/PhaseTracker';
-import { DEFAULT_MODEL } from './lib/models';
-import { runPipeline } from './lib/pipeline';
+import { AdResultView } from '../components/AdResult';
+import { ConfigBar } from '../components/ConfigBar';
+import { PhaseTracker } from '../components/PhaseTracker';
+import { DEFAULT_MODEL } from '../lib/models';
+import { runPipeline } from '../lib/pipeline';
 import type {
   AdResult,
   ModelId,
   PhaseStatus,
   PipelineMode,
   StageId,
-} from './lib/types';
-import './App.css';
+} from '../lib/types';
 
 const PHASES: ReadonlyArray<{
   id: StageId;
@@ -59,7 +60,7 @@ function saveConfig(config: PersistedConfig): void {
   }
 }
 
-export default function App() {
+export default function Home() {
   const initial = useMemo(() => loadConfig(), []);
   const [modelId, setModelId] = useState<ModelId>(initial.modelId);
   const [apiKey, setApiKey] = useState<string>(initial.apiKey);
@@ -89,14 +90,10 @@ export default function App() {
   const [pipelineAttempts, setPipelineAttempts] = useState<number>(0);
   const [pipelineRefinements, setPipelineRefinements] = useState<number>(0);
   const abortRef = useRef<AbortController | null>(null);
-  const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
+  const apiKeyInputRef = useRef<HTMLInputElement>(null);
 
   const persist = (next: Partial<PersistedConfig>) => {
-    saveConfig({
-      modelId: next.modelId ?? modelId,
-      apiKey: next.apiKey ?? apiKey,
-      mode: next.mode ?? mode,
-    });
+    saveConfig({ modelId: next.modelId ?? modelId, apiKey: next.apiKey ?? apiKey, mode: next.mode ?? mode });
   };
 
   const handleModelChange = (id: ModelId) => {
@@ -326,8 +323,8 @@ export default function App() {
 
         <footer className="page-foot">
           <p>
-            Keys stay in your browser (localStorage). Calls hit the model
-            provider directly — no proxy, no logs.
+            Keys stay in your browser (localStorage). Calls go through a same-origin
+            Vercel serverless proxy that forwards to the model provider.
           </p>
         </footer>
       </div>

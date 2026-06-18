@@ -14,7 +14,7 @@
  *   max 2 refinements by default
  *
  * Two modes:
- *   - `fast`:  intent → copy, no validation/refinement (Vercel Hobby friendly)
+ *   - `fast`:  intent → copy, no validation/refinement
  *   - `full`:  full state machine with validate→refine loop
  */
 
@@ -370,11 +370,13 @@ async function runFullPipeline(
 
       if (passed) {
         trace.push('validate-pass');
+        resumeFrom = 'done';
         break;
       }
 
       trace.push('validate-fail');
       if (refinements >= maxRefinements) {
+        resumeFrom = 'done';
         break;
       }
       resumeFrom = 'refine';

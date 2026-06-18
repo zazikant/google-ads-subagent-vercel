@@ -7,9 +7,6 @@ export const MODELS: Record<ModelId, ModelConfig> = {
     description: 'OpenAI GPT-OSS-120B served via NVIDIA NIM (integrate.api.nvidia.com). Low reasoning effort.',
     baseUrl: 'https://integrate.api.nvidia.com/v1/chat/completions',
     model: 'openai/gpt-oss-120b',
-    // gpt-oss-120b is a reasoning model. NVIDIA gateway rejects 'none' —
-    // valid values are 'low' | 'medium' | 'high'. 'low' minimizes chain-of-thought
-    // so most of the token budget lands in `content`.
     reasoningEffort: 'low',
     docsUrl: 'https://build.nvidia.com/openai/gpt-oss-120b',
     timeoutMs: 120_000,
@@ -21,13 +18,8 @@ export const MODELS: Record<ModelId, ModelConfig> = {
     description: 'GLM 5.1 via opencode.ai/zen/go (reasoning disabled for full output budget).',
     baseUrl: 'https://opencode.ai/zen/go/v1/chat/completions',
     model: 'glm-5.1',
-    // OpenCode Zen accepts 'none' to fully disable internal reasoning.
-    // All tokens then land in `content`. Matches ax-opencode-translator.
     reasoningEffort: 'none',
     docsUrl: 'https://opencode.ai/docs/zen',
-    // Matches ax-opencode-translator: 50s leaves a 10s buffer for Vercel's
-    // 60s maxDuration. The browser has no such limit, but staying under 60s
-    // keeps the integration behavior identical to the canonical implementation.
     timeoutMs: 50_000,
     defaultMaxTokens: 4096,
   },

@@ -1,7 +1,7 @@
 /**
  * Robust JSON parser for LLM outputs.
  *
- * Recovery chain (ported from atomic-graph-opencode):
+ * Recovery chain:
  *   1. Strip markdown code fences
  *   2. Try direct parse
  *   3. Extract balanced JSON via bracket matching
@@ -103,10 +103,8 @@ function extractBalancedJSON(text: string): string | null {
       depth++;
     } else if (ch === '}' || ch === ']') {
       depth--;
-      if (depth === 0 && (ch === closeCh)) {
+      if (depth === 0 && ch === closeCh) {
         return text.slice(startIdx, i + 1);
-      } else if (depth === 0) {
-        // We hit the wrong closing brace for what we started with; keep scanning.
       }
       if (depth < 0) return null;
     }

@@ -1,10 +1,11 @@
 # Google Ads AI Subagent
 
-A Vite + React + TypeScript app that turns a one-line product description
-into Google Ads copy that actually passes compliance. Three specialized
-AI agents run in sequence: **strategy → copy → compliance**, and any
-issues the compliance agent flags are applied as fixes before you see
-the result.
+A **Next.js + TypeScript** app that turns a one-line product description into
+Google Ads copy that actually passes compliance. Four specialized activities
+run in sequence: **strategy → copy → validate → refine**, and any issues
+the compliance activity flags are applied as fixes before you see the
+result. Backed by a same-origin Vercel serverless proxy at `/api/chat`
+so the browser never talks directly to NVIDIA / OpenCode.
 
 ## Models
 
@@ -17,52 +18,65 @@ Pick one in the config bar:
 
 Reasoning-effort values are provider-specific: NVIDIA's gateway only
 accepts `low | medium | high`; OpenCode Zen accepts `none` to fully
-disable chain-of-thought. Both are set per-model in `src/lib/models.ts`.
+disable chain-of-thought. Both are set per-model in `lib/models.ts`.
 
 Your API key is stored only in `localStorage`; the app makes calls
-straight to the provider — no proxy, no server.
+straight to the provider via the same-origin Vercel serverless function —
+no proxy the user has to trust, no logs.
 
 ## Stack
 
-- **Vite 8** + **React 19** + **TypeScript 6**
+- **Next.js 14** (App Router) + **TypeScript 5**
+- **React 18** with client components for the interactive parts
 - Pure CSS, no UI framework
-- Lint: `eslint` + `typescript-eslint` + `react-hooks` + `react-refresh`
-- Deploy: Vercel static (no server functions)
+- Lint: `next lint` (uses `next/core-web-vitals` + `next/typescript`)
+- Deploy: Vercel native (Next.js auto-detected)
 
 ## Scripts
 
 ```bash
 npm install
-npm run dev        # vite dev server
-npm run build      # tsc -b && vite build
-npm run preview    # serve the production build locally
-npm run lint       # eslint .
+npm run dev        # next dev
+npm run build      # next build
+npm run start      # next start (production)
+npm run lint       # next lint
 ```
 
 ## Deploy to Vercel
 
-1. Push the repo to GitHub.
-2. Import the repo in Vercel — framework preset auto-detects as Vite.
-3. No env vars required. Build command: `npm run build`. Output: `dist`.
-4. SPA rewrites are configured in `vercel.json`.
+1. Push to GitHub.
+2. Import the repo in Vercel — Next.js is auto-detected.
+3. No environment variables required. The user provides their own API
+   key in the UI; the key is sent in the request `Authorization`
+   header to `/api/chat` and forwarded to the upstream provider.
+4. `app/api/chat/route.ts` is configured with `maxDuration: 120s` in
+   `vercel.json` to handle the slowest provider responses.
 
 ## Architecture
 
 ```
-src/
-  lib/
-    types.ts         - shared types
-    models.ts        - model registry + stage temperatures
-    jsonParser.ts    - robust LLM JSON parser (4-tier recovery)
-    llmClient.ts     - OpenAI-compatible chat completion wrapper
-    pipeline.ts      - 3-stage orchestration (intent → copy → compliance)
-  components/
-    ConfigBar.tsx    - model + API key input
-    PhaseTracker.tsx - live status of each stage
-    AdResult.tsx     - Google-style preview + copy button
-  App.tsx            - root component
-  App.css            - styles
+app/
+  layout.tsx              - root layout (server component)
+  page.tsx                - home page (client component, all state)
+  globals.css             - styles
+  api/chat/route.ts       - Vercel serverless proxy (POST handler)
+components/
+  ConfigBar.tsx           - model + API key input
+  PhaseTracker.tsx        - live status of each stage
+  AdResult.tsx            - Google-style preview + copy button
+lib/
+  types.ts                - shared types
+  models.ts               - model registry + stage temperatures
+  jsonParser.ts           - robust LLM JSON parser
+  llmClient.ts            - browser-side fetch wrapper
+  pipeline.ts             - AX DSPy-style state machine
 ```
+
+The browser never calls NVIDIA or OpenCode directly — those endpoints
+don't return CORS headers. Instead, it calls `POST /api/chat` (same
+origin), and the serverless function in `app/api/chat/route.ts`
+forwards the request with the user's bearer token to the upstream
+provider.
 
 ## Why these patterns?
 
@@ -80,9 +94,7 @@ and
 - **Dynamic `max_tokens` per stage** — calculated from input length
   (1 token ≈ 4 chars Latin / 2 chars CJK), clamped per-stage.
 - **Robust JSON parser** — strips code fences, extracts balanced
-  brackets, fixes trailing commas, falls back to greedy regex. Stops
-  the LLM's first love — wrapping valid JSON in ```json fences — from
-  breaking the pipeline.
+  brackets, fixes trailing commas, falls back to greedy regex.
 - **Provider-specific reasoning effort** — OpenCode Zen accepts `none`
   (disables CoT entirely); NVIDIA NIM accepts only `low | medium | high`
   (we use `low` to minimize the budget spent on character-counting CoT).
