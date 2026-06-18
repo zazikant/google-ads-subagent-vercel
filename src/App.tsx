@@ -11,6 +11,7 @@ import type {
   PipelineMode,
   StageId,
 } from './lib/types';
+import './App.css';
 
 const PHASES: ReadonlyArray<{
   id: StageId;
@@ -25,7 +26,7 @@ const PHASES: ReadonlyArray<{
   { id: 'refine', num: '4', label: 'Refinement Loop', color: '#D97706', bg: '#FFFBEB' },
 ];
 
-const STORAGE_KEY = 'gas:config:v2';
+const STORAGE_KEY = 'gas:config:v3';
 
 interface PersistedConfig {
   readonly modelId: ModelId;
@@ -62,6 +63,8 @@ export default function App() {
   const initial = useMemo(() => loadConfig(), []);
   const [modelId, setModelId] = useState<ModelId>(initial.modelId);
   const [apiKey, setApiKey] = useState<string>(initial.apiKey);
+  const [apiKeyDraft, setApiKeyDraft] = useState<string>(initial.apiKey);
+  const [keyCommitted, setKeyCommitted] = useState<boolean>(Boolean(initial.apiKey));
   const [mode, setMode] = useState<PipelineMode>(initial.mode);
   const [product, setProduct] = useState('');
   const [audience, setAudience] = useState('');
@@ -86,9 +89,14 @@ export default function App() {
   const [pipelineAttempts, setPipelineAttempts] = useState<number>(0);
   const [pipelineRefinements, setPipelineRefinements] = useState<number>(0);
   const abortRef = useRef<AbortController | null>(null);
+  const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
 
   const persist = (next: Partial<PersistedConfig>) => {
-    saveConfig({ modelId: next.modelId ?? modelId, apiKey: next.apiKey ?? apiKey, mode: next.mode ?? mode });
+    saveConfig({
+      modelId: next.modelId ?? modelId,
+      apiKey: next.apiKey ?? apiKey,
+      mode: next.mode ?? mode,
+    });
   };
 
   const handleModelChange = (id: ModelId) => {
@@ -96,18 +104,34 @@ export default function App() {
     persist({ modelId: id });
   };
 
-  const handleApiKeyChange = (key: string) => {
-    setApiKey(key);
-    persist({ apiKey: key });
-  };
-
   const handleModeChange = (m: PipelineMode) => {
     setMode(m);
     persist({ mode: m });
   };
 
+  const commitApiKey = () => {
+    const trimmed = apiKeyDraft.trim();
+    setApiKey(trimmed);
+    setKeyCommitted(Boolean(trimmed));
+    persist({ apiKey: trimmed });
+  };
+
+  const handleApiKeyOk = () => {
+    commitApiKey();
+    apiKeyInputRef.current?.blur();
+  };
+
+  const handleApiKeyKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleApiKeyOk();
+    }
+  };
+
   const handleClear = () => {
     setApiKey('');
+    setApiKeyDraft('');
+    setKeyCommitted(false);
     persist({ apiKey: '' });
   };
 
@@ -117,7 +141,7 @@ export default function App() {
       return;
     }
     if (!apiKey.trim()) {
-      setError('Please enter an API key in the config bar.');
+      setError('Click OK next to the API key first to save it.');
       return;
     }
     setError('');
@@ -185,10 +209,14 @@ export default function App() {
 
         <ConfigBar
           modelId={modelId}
-          apiKey={apiKey}
           onModelChange={handleModelChange}
-          onApiKeyChange={handleApiKeyChange}
+          apiKeyDraft={apiKeyDraft}
+          onApiKeyDraftChange={setApiKeyDraft}
+          onApiKeyOk={handleApiKeyOk}
+          onApiKeyKeyDown={handleApiKeyKeyDown}
           onClear={handleClear}
+          keyCommitted={keyCommitted}
+          apiKeyInputRef={apiKeyInputRef}
         />
 
         <section className="card">
@@ -242,21 +270,16 @@ export default function App() {
             className="field-textarea"
           />
 
-          <div className="field-grid">
-            <div>
-              <label className="field-label" htmlFor="audience">
-                Target Audience
-              </label>
-              <input
-                id="audience"
-                value={audience}
-                onChange={(e) => setAudience(e.target.value)}
-                placeholder="e.g. Startup founders at SMBs"
-                className="field-input"
-              />
-            </div>
-            <div />
-          </div>
+          <label className="field-label" htmlFor="audience">
+            Target Audience <span className="field-label-hint">(optional)</span>
+          </label>
+          <input
+            id="audience"
+            value={audience}
+            onChange={(e) => setAudience(e.target.value)}
+            placeholder="e.g. Startup founders at SMBs"
+            className="field-input"
+          />
 
           {error && <p className="error-text">{error}</p>}
 
@@ -267,7 +290,7 @@ export default function App() {
           ) : (
             <button
               onClick={run}
-              disabled={running}
+              disabled={running || !keyCommitted}
               className="btn btn-primary"
             >
               {running ? 'Running pipeline…' : `Generate Ad Copy (${mode}) →`}
@@ -291,7 +314,7 @@ export default function App() {
             </div>
             <div className="trace-steps">
               {pipelineTrace.map((step, i) => (
-                <span key={i} className={`trace-step ${step.includes('fail') ? 'trace-step-bad' : step.includes('pass') || step.includes('echo') ? 'trace-step-info' : ''}`}>
+                <span key={i} className={`trace-step ${step.includes('fail') ? 'trace-step-bad' : step.includes('pass') || step.includes('echo') || step.includes('fixes') ? 'trace-step-info' : ''}`}>
                   {step}
                 </span>
               ))}

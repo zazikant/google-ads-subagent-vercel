@@ -4,21 +4,31 @@ import type { ModelId } from '../lib/types';
 
 interface ConfigBarProps {
   readonly modelId: ModelId;
-  readonly apiKey: string;
   readonly onModelChange: (id: ModelId) => void;
-  readonly onApiKeyChange: (key: string) => void;
+  readonly apiKeyDraft: string;
+  readonly onApiKeyDraftChange: (value: string) => void;
+  readonly onApiKeyOk: () => void;
+  readonly onApiKeyKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void;
   readonly onClear: () => void;
+  readonly keyCommitted: boolean;
+  readonly apiKeyInputRef: React.RefObject<HTMLInputElement | null>;
 }
 
 export function ConfigBar({
   modelId,
-  apiKey,
   onModelChange,
-  onApiKeyChange,
+  apiKeyDraft,
+  onApiKeyDraftChange,
+  onApiKeyOk,
+  onApiKeyKeyDown,
   onClear,
+  keyCommitted,
+  apiKeyInputRef,
 }: ConfigBarProps) {
   const [showKey, setShowKey] = useState(false);
   const config = MODELS[modelId];
+  const hasDraft = apiKeyDraft.trim().length > 0;
+  const draftMatchesCommitted = apiKeyDraft === '' || (keyCommitted && hasDraft);
 
   return (
     <div className="config-bar">
@@ -38,6 +48,12 @@ export function ConfigBar({
             </option>
           ))}
         </select>
+        <span
+          className={`config-status ${keyCommitted ? 'config-status-ok' : 'config-status-warn'}`}
+          title={keyCommitted ? 'API key saved' : 'API key not yet saved'}
+        >
+          {keyCommitted ? '● key saved' : '○ key not set'}
+        </span>
       </div>
 
       <div className="config-row">
@@ -47,13 +63,16 @@ export function ConfigBar({
         <div className="api-key-wrap">
           <input
             id="api-key"
+            ref={apiKeyInputRef}
             type={showKey ? 'text' : 'password'}
-            value={apiKey}
-            onChange={(e) => onApiKeyChange(e.target.value)}
+            value={apiKeyDraft}
+            onChange={(e) => onApiKeyDraftChange(e.target.value)}
+            onKeyDown={onApiKeyKeyDown}
             placeholder={modelId === 'nvidia-gpt-oss-120b' ? 'nvapi-...' : 'sk-...'}
             className="config-input"
             autoComplete="off"
             spellCheck={false}
+            aria-describedby="api-key-status"
           />
           <button
             type="button"
@@ -63,7 +82,15 @@ export function ConfigBar({
           >
             {showKey ? 'Hide' : 'Show'}
           </button>
-          {apiKey && (
+          <button
+            type="button"
+            onClick={onApiKeyOk}
+            disabled={!hasDraft || draftMatchesCommitted}
+            className="config-ok"
+          >
+            OK
+          </button>
+          {keyCommitted && (
             <button type="button" onClick={onClear} className="config-clear" aria-label="Clear API key">
               Clear
             </button>
@@ -71,11 +98,12 @@ export function ConfigBar({
         </div>
       </div>
 
-      <p className="config-hint">
+      <p className="config-hint" id="api-key-status">
         {config.description}{' '}
         <a href={config.docsUrl} target="_blank" rel="noreferrer">
           Docs ↗
         </a>
+        <span className="config-hint-tail"> · Keys are stored only in your browser (localStorage).</span>
       </p>
     </div>
   );
