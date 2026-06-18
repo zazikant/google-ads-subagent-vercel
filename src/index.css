@@ -1,0 +1,11 @@
+/* Vite + React app — base reset only; component styles live in App.css */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #f8fafc;
+}
+
+#root {
+  min-height: 100vh;
+}
