@@ -38,11 +38,6 @@ const PROVIDERS: Record<ChatRequest['model'], ProviderConfig> = {
 
 const ALLOWED_MODELS = new Set(Object.keys(PROVIDERS));
 
-export const config = {
-  // Allow up to 120s for upstream calls — matches the slowest provider timeout.
-  maxDuration: 120,
-};
-
 export default async function handler(req: Request): Promise<Response> {
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
