@@ -10,10 +10,14 @@ the result.
 
 Pick one in the config bar:
 
-| Model | Provider | Notes |
-| --- | --- | --- |
-| `openai/gpt-oss-120b` | NVIDIA NIM (`integrate.api.nvidia.com`) | Default. |
-| `glm-5.1` | OpenCode Zen (`opencode.ai/zen/go`) | Reasoning disabled for full output budget. |
+| Model | Provider | Reasoning | Timeout |
+| --- | --- | --- | --- |
+| `openai/gpt-oss-120b` | NVIDIA NIM (`integrate.api.nvidia.com`) | `low` | 120s |
+| `glm-5.1` | OpenCode Zen (`opencode.ai/zen/go`) | `none` (disabled) | 50s |
+
+Reasoning-effort values are provider-specific: NVIDIA's gateway only
+accepts `low | medium | high`; OpenCode Zen accepts `none` to fully
+disable chain-of-thought. Both are set per-model in `src/lib/models.ts`.
 
 Your API key is stored only in `localStorage`; the app makes calls
 straight to the provider — no proxy, no server.
@@ -63,22 +67,30 @@ src/
 ## Why these patterns?
 
 Ported from
-[atomic-graph-opencode](https://github.com/zazikant/atomic-graph-opencode)
+[ax-opencode-translator](https://github.com/zazikant/ax-opencode-translator)
 and
 [ax-translator](https://github.com/zazikant/ax-translator):
 
+- **AX DSPy-style orchestration** — `ErrorEntry` history, `compileRefinePrompt()`
+  (DSPy `Module.compile()` analog), `isEcho()` detection, `resumeFrom`
+  state machine. Activities (intent → copy → validate → refine) carry
+  results forward, never recompute earlier stages.
 - **Stage-specific temperatures** — intent/copy at 0.3 (focused),
-  compliance at 0.1 (objective). Lower temperature = more deterministic
-  judgement.
-- **Dynamic `max_tokens` per stage** — intent/copy get 2048, compliance
-  gets 1024. Compliance just returns small JSON.
+  validate at 0.1 (objective), refine at 0.2 (creative fixes).
+- **Dynamic `max_tokens` per stage** — calculated from input length
+  (1 token ≈ 4 chars Latin / 2 chars CJK), clamped per-stage.
 - **Robust JSON parser** — strips code fences, extracts balanced
-  brackets, falls back to greedy regex. Stops the LLM's first love —
-  wrapping valid JSON in ```json fences — from breaking the pipeline.
-- **Reasoning-model fallback** — OpenCode's GLM 5.1 returns
-  `reasoning_content` when `content` is empty. We fall back
-  automatically and disable thinking via `reasoning_effort: "none"`.
+  brackets, fixes trailing commas, falls back to greedy regex. Stops
+  the LLM's first love — wrapping valid JSON in ```json fences — from
+  breaking the pipeline.
+- **Provider-specific reasoning effort** — OpenCode Zen accepts `none`
+  (disables CoT entirely); NVIDIA NIM accepts only `low | medium | high`
+  (we use `low` to minimize the budget spent on character-counting CoT).
 - **User-friendly errors** — 401/403/404/429/5xx each map to a specific
   message instead of dumping the raw body.
+- **Per-model timeout** — OpenCode: 50s (matches `ax-opencode-translator`'s
+  10s buffer under Vercel's 60s `maxDuration`); NVIDIA: 120s.
 - **AbortController plumbing** — user can cancel mid-run, and every fetch
-  has a 120s timeout.
+  has a model-specific timeout.
+- **Fast mode** — single-pass `intent → copy` for Vercel Hobby plan or
+  when speed matters more than validation.

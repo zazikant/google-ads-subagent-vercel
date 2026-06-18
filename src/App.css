@@ -426,6 +426,72 @@ select {
   color: #9ca3af;
 }
 
+.trace {
+  background: white;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+}
+
+.trace-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.trace-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.trace-score {
+  font-size: 11px;
+  font-weight: 700;
+  color: #059669;
+  background: #dcfce7;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-family: monospace;
+}
+
+.trace-stat {
+  font-size: 11px;
+  color: #6b7280;
+  font-family: monospace;
+}
+
+.trace-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.trace-step {
+  font-size: 10px;
+  font-weight: 600;
+  color: #4b5563;
+  background: #f3f4f6;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-family: 'SF Mono', Menlo, monospace;
+}
+
+.trace-step-info {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.trace-step-bad {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
 .page-foot p {
   margin: 0;
 }
