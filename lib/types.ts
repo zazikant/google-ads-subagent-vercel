@@ -34,6 +34,10 @@ export interface ChatOptions {
   readonly temperature?: number;
   readonly maxTokens?: number;
   readonly signal?: AbortSignal;
+  /** Fired for every live content chunk as it arrives from the model. */
+  readonly onChunk?: (text: string, reasoning: boolean) => void;
+  /** Fired for every structured log line emitted by the streaming proxy. */
+  readonly onLog?: (line: string) => void;
 }
 
 export interface ChatResponse {
@@ -76,6 +80,8 @@ export interface PipelineInput {
   readonly tone: string;
   readonly signal?: AbortSignal;
   readonly onStage: (log: StageLog) => void;
+  readonly onLog?: (line: string) => void;
+  readonly onChunk?: (text: string, phase: StageId) => void;
   readonly mode?: PipelineMode;
   readonly threshold?: number;
   readonly maxRefinements?: number;

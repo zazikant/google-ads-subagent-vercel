@@ -43,6 +43,75 @@ interface ErrorEntry {
   issues?: string[];
 }
 
+// ─── Inter-stage cooldown (ported from ax-translator / rag-document-assistant)
+// NVIDIA's rate-limit window needs time to reset between back-to-back LLM
+// calls in the same pipeline. Adaptive based on whether the previous stage
+// had to retry:
+//   - Succeeded on first attempt: short breather (3s)
+//   - Succeeded after retries:     medium (10s)
+//   - Failed:                      long (20s, or 30s if rate-limit)
+// Hard-capped so the Vercel function doesn't get killed mid-pipeline on
+// smaller plans. Override per stage by editing these constants.
+export const COOLDOWN_FIRST_SUCCESS_SEC = 3;
+export const COOLDOWN_RETRY_SUCCESS_SEC = 10;
+export const COOLDOWN_FAILED_SEC = 20;
+export const COOLDOWN_RATE_LIMIT_SEC = 30;
+export const COOLDOWN_HARD_CAP_SEC = 30;
+
+const RATE_LIMIT_RE = /rate.?limit|429|too many requests/i;
+
+function adaptiveCooldownSec(
+  succeeded: boolean,
+  retried: boolean,
+  lastErrorMsg = '',
+): number {
+  let s: number;
+  if (!succeeded) {
+    s = RATE_LIMIT_RE.test(lastErrorMsg) ? COOLDOWN_RATE_LIMIT_SEC : COOLDOWN_FAILED_SEC;
+  } else if (retried) {
+    s = COOLDOWN_RETRY_SUCCESS_SEC;
+  } else {
+    s = COOLDOWN_FIRST_SUCCESS_SEC;
+  }
+  return Math.min(s, COOLDOWN_HARD_CAP_SEC);
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const t = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** Wait between stages, logging the countdown so the UI doesn't look frozen. */
+async function interStageCooldown(
+  seconds: number,
+  onLog: ((line: string) => void) | undefined,
+  nextStage: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (seconds <= 0) return;
+  onLog?.(`[pipeline] Cooldown: waiting ${seconds}s before ${nextStage} (rate-limit window reset)…`);
+  try {
+    await sleep(seconds * 1000, signal);
+    onLog?.(`[pipeline] Cooldown complete — starting ${nextStage}.`);
+  } catch (err) {
+    // Aborted during cooldown — rethrow so the caller can bail.
+    throw err;
+  }
+}
+
 // ─── Token Estimation (CJK vs Latin, from ax-translator) ────────────
 
 function estimateTokens(text: string): number {
@@ -203,6 +272,34 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutput>
   return runFullPipeline(input, threshold, maxRefinements);
 }
 
+// Track whether the most recent stage's controlled stream did any retries,
+// so inter-stage cooldown can be adaptive. The streaming proxy logs which
+// attempt each call reached — we sniff those log lines.
+function makeAttemptTracker() {
+  let retried = false;
+  let lastErrorMsg = '';
+  let succeeded = true;
+  const onLog = (line: string) => {
+    if (/\[stream\]\s+retry\b/.test(line)) retried = true;
+    if (/\[stream\]\s+ERROR/.test(line) || /\[stream\]\s+TIMEOUT/.test(line)) {
+      succeeded = false;
+      lastErrorMsg = line;
+    }
+    if (/\[stream\]\s+done/.test(line)) {
+      succeeded = true;
+    }
+  };
+  return {
+    onLog,
+    reset: () => {
+      retried = false;
+      lastErrorMsg = '';
+      succeeded = true;
+    },
+    snapshot: () => ({ retried, succeeded, lastErrorMsg }),
+  };
+}
+
 // ─── runFastPipeline — single pass, no validate/refine ──────────────
 
 async function runFastPipeline(input: PipelineInput): Promise<PipelineOutput> {
@@ -212,17 +309,74 @@ async function runFastPipeline(input: PipelineInput): Promise<PipelineOutput> {
     text: '',
   }));
   const trace: string[] = ['fast-pipeline'];
+  const tracker = makeAttemptTracker();
 
   setStage(stages, 'intent', 'running', '');
-  const intentText = await runIntent(input);
+  let intentText: string;
+  try {
+    intentText = await runIntent(input, false, {
+      onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+      onChunk: (text) => input.onChunk?.(text, 'intent'),
+    });
+  } catch (err) {
+    return await handleFatal(err, 'intent', 1, stages, trace, [], 'fast');
+  }
+  if (isEcho(input.product, intentText)) {
+    trace.push('echo-detected', 'intent-retry');
+    tracker.reset();
+    intentText = await runIntent(input, true, {
+      onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+      onChunk: (text) => input.onChunk?.(text, 'intent'),
+    });
+  }
   setStage(stages, 'intent', 'done', intentText);
   trace.push('intent');
 
+  // Inter-stage cooldown — only when the previous stage retried or failed.
+  const prev = tracker.snapshot();
+  if (!prev.succeeded || prev.retried) {
+    const cd = adaptiveCooldownSec(prev.succeeded, prev.retried, prev.lastErrorMsg);
+    if (cd > 0) {
+      try {
+        await interStageCooldown(cd, input.onLog, 'copy', input.signal);
+      } catch (err) {
+        return await handleFatal(err, 'copy', 1, stages, trace, [], 'fast');
+      }
+    }
+  }
+  tracker.reset();
+
   setStage(stages, 'copy', 'running', '');
-  let copy = await runCopy(input, intentText, false, [], []);
-  if (isEcho(input.product, JSON.stringify(copy))) {
-    trace.push('echo-detected', 'copy-retry');
-    copy = await runCopy(input, intentText, true, [], []);
+  let copy: AdCopy;
+  try {
+    copy = await runCopy(input, intentText, false, [], [],
+      {
+        onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+        onChunk: (text) => input.onChunk?.(text, 'copy'),
+      },
+    );
+    if (isEcho(input.product, JSON.stringify(copy))) {
+      trace.push('echo-detected', 'copy-retry');
+      tracker.reset();
+      copy = await runCopy(input, intentText, true, [], [],
+        {
+          onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+          onChunk: (text) => input.onChunk?.(text, 'copy'),
+        },
+      );
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    trace.push('copy-fail');
+    return {
+      ad: emptyAd(`Copy generation failed: ${msg}`),
+      stages,
+      pipeline: trace,
+      score: 0,
+      attempts: 1,
+      refinements: 0,
+      mode: 'fast',
+    };
   }
   const finalCopy = normalizeCopy(copy);
   setStage(
@@ -264,6 +418,7 @@ async function runFullPipeline(
   }));
   const trace: string[] = ['full-pipeline'];
   const errorHistory: ErrorEntry[] = [];
+  const tracker = makeAttemptTracker();
   let attempt = 0;
   let refinements = 0;
   let score = 0;
@@ -281,7 +436,10 @@ async function runFullPipeline(
     setStage(stages, 'intent', 'running', '');
     let intentText: string;
     try {
-      intentText = await runIntent(input);
+      intentText = await runIntent(input, false, {
+        onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+        onChunk: (text) => input.onChunk?.(text, 'intent'),
+      });
     } catch (err) {
       return await handleFatal(err, 'intent', attempt, stages, trace, errorHistory, 'full');
     }
@@ -289,7 +447,11 @@ async function runFullPipeline(
     if (isEcho(input.product, intentText)) {
       trace.push('echo-detected', 'intent-retry');
       attempt++;
-      intentText = await runIntent(input, true);
+      tracker.reset();
+      intentText = await runIntent(input, true, {
+        onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+        onChunk: (text) => input.onChunk?.(text, 'intent'),
+      });
     }
     setStage(stages, 'intent', 'done', intentText);
     copy = { headlines: [], descriptions: [] };
@@ -297,14 +459,39 @@ async function runFullPipeline(
 
     // ── Stage 2: Copy ───────────────────────────────────────────
     if (resumeFrom === 'copy') {
+      // Adaptive inter-stage cooldown between intent → copy.
+      const prev = tracker.snapshot();
+      if (!prev.succeeded || prev.retried) {
+        const cd = adaptiveCooldownSec(prev.succeeded, prev.retried, prev.lastErrorMsg);
+        if (cd > 0) {
+          try {
+            await interStageCooldown(cd, input.onLog, 'copy', input.signal);
+          } catch (err) {
+            return await handleFatal(err, 'copy', attempt, stages, trace, errorHistory, 'full');
+          }
+        }
+      }
+      tracker.reset();
+
       trace.push('copy');
       setStage(stages, 'copy', 'running', '');
       try {
-        let raw = await runCopy(input, intentText, false, [], errorHistory);
+        let raw = await runCopy(input, intentText, false, [], errorHistory,
+          {
+            onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+            onChunk: (text) => input.onChunk?.(text, 'copy'),
+          },
+        );
         if (isEcho(intentText, JSON.stringify(raw))) {
           trace.push('echo-detected', 'copy-retry');
           attempt++;
-          raw = await runCopy(input, intentText, true, [], errorHistory);
+          tracker.reset();
+          raw = await runCopy(input, intentText, true, [], errorHistory,
+            {
+              onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+              onChunk: (text) => input.onChunk?.(text, 'copy'),
+            },
+          );
         }
         copy = normalizeCopy(raw);
       } catch (err) {
@@ -335,11 +522,32 @@ async function runFullPipeline(
   while ((resumeFrom as Stage) !== 'done' && refinements <= maxRefinements) {
     // ── Stage 3: Validate ───────────────────────────────────────
     if ((resumeFrom as Stage) === 'validate') {
+      // Adaptive cooldown before validate (after copy finished).
+      const prev = tracker.snapshot();
+      if (prev.retried || !prev.succeeded) {
+        const cd = adaptiveCooldownSec(prev.succeeded, prev.retried, prev.lastErrorMsg);
+        if (cd > 0) {
+          try {
+            await interStageCooldown(cd, input.onLog, 'validate', input.signal);
+          } catch {
+            errorHistory.push({ attempt, stage: 'validate', error: 'aborted' });
+            trace.push('validate-fail');
+            score = 0.7;
+            lastNotes = 'Validation aborted — using estimated score.';
+            break;
+          }
+        }
+      }
+      tracker.reset();
+
       trace.push('validate');
       setStage(stages, 'validate', 'running', '');
       let report: ValidationReport;
       try {
-        report = await runValidate(input, copy);
+        report = await runValidate(input, copy, {
+          onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+          onChunk: (text) => input.onChunk?.(text, 'validate'),
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         errorHistory.push({ attempt, stage: 'validate', error: msg });
@@ -384,17 +592,45 @@ async function runFullPipeline(
 
     // ── Stage 4: Refine (DSPy-compiled prompt) ───────────────────
     if ((resumeFrom as Stage) === 'refine') {
+      // Adaptive cooldown before refine (retries are token-heavy).
+      const prev = tracker.snapshot();
+      if (prev.retried || !prev.succeeded) {
+        const cd = adaptiveCooldownSec(prev.succeeded, prev.retried, prev.lastErrorMsg);
+        if (cd > 0) {
+          try {
+            await interStageCooldown(cd, input.onLog, 'refine', input.signal);
+          } catch {
+            errorHistory.push({ attempt, stage: 'refine', error: 'aborted', issues: currentIssues });
+            trace.push('refine-fail');
+            resumeFrom = 'done';
+            break;
+          }
+        }
+      }
+      tracker.reset();
+
       refinements++;
       attempt++;
       trace.push(`refine-${refinements}`);
       setStage(stages, 'refine', 'running', '');
 
       try {
-        const refined = await runRefine(input, copy, currentIssues, errorHistory);
+        const refined = await runRefine(input, copy, currentIssues, errorHistory, false,
+          {
+            onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+            onChunk: (text) => input.onChunk?.(text, 'refine'),
+          },
+        );
         if (isEcho(JSON.stringify(copy), JSON.stringify(refined))) {
           trace.push('refine-echo', 'refine-retry');
           attempt++;
-          const retry = await runRefine(input, copy, currentIssues, errorHistory, true);
+          tracker.reset();
+          const retry = await runRefine(input, copy, currentIssues, errorHistory, true,
+            {
+              onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+              onChunk: (text) => input.onChunk?.(text, 'refine'),
+            },
+          );
           copy = normalizeCopy(retry);
         } else {
           copy = normalizeCopy(refined);
@@ -436,7 +672,11 @@ async function runFullPipeline(
 
 // ─── Stage activities (one LLM call each) ──────────────────────────
 
-async function runIntent(input: PipelineInput, isRetry = false): Promise<string> {
+async function runIntent(
+  input: PipelineInput,
+  isRetry = false,
+  streaming?: { onLog?: (line: string) => void; onChunk?: (text: string) => void },
+): Promise<string> {
   const system = isRetry
     ? `${INTENT_SYSTEM}\n\nCRITICAL: You MUST extract value props, intent type, keywords, and a positioning statement. Do NOT echo the product description unchanged.`
     : INTENT_SYSTEM;
@@ -453,6 +693,8 @@ async function runIntent(input: PipelineInput, isRetry = false): Promise<string>
     temperature: STAGE_TEMPERATURES.intent,
     maxTokens: calculateMaxTokens(input.product, 'intent'),
     signal: input.signal,
+    onLog: streaming?.onLog,
+    onChunk: streaming?.onChunk ? (text) => streaming.onChunk!(text) : undefined,
   });
   return cleanText(result.content);
 }
@@ -463,6 +705,7 @@ async function runCopy(
   isRetry: boolean,
   _issues: string[],
   errorHistory: ErrorEntry[],
+  streaming?: { onLog?: (line: string) => void; onChunk?: (text: string) => void },
 ): Promise<AdCopy> {
   void _issues;
   const fixContext = compileRefinePrompt([], errorHistory, 'copy');
@@ -482,11 +725,17 @@ async function runCopy(
     temperature: STAGE_TEMPERATURES.copy,
     maxTokens: calculateMaxTokens(intentText, 'copy'),
     signal: input.signal,
+    onLog: streaming?.onLog,
+    onChunk: streaming?.onChunk ? (text) => streaming.onChunk!(text) : undefined,
   });
   return parseLLMJson<AdCopy>(result.content);
 }
 
-async function runValidate(input: PipelineInput, copy: AdCopy): Promise<ValidationReport> {
+async function runValidate(
+  input: PipelineInput,
+  copy: AdCopy,
+  streaming?: { onLog?: (line: string) => void; onChunk?: (text: string) => void },
+): Promise<ValidationReport> {
   const messages: ChatMessage[] = [
     { role: 'system', content: VALIDATE_SYSTEM },
     {
@@ -499,6 +748,8 @@ async function runValidate(input: PipelineInput, copy: AdCopy): Promise<Validati
     temperature: STAGE_TEMPERATURES.compliance ?? 0.1,
     maxTokens: STAGE_MAX_TOKENS.compliance,
     signal: input.signal,
+    onLog: streaming?.onLog,
+    onChunk: streaming?.onChunk ? (text) => streaming.onChunk!(text) : undefined,
   });
 
   const parsed = parseLLMJson<ValidationReport>(result.content);
@@ -516,6 +767,7 @@ async function runRefine(
   issues: string[],
   errorHistory: ErrorEntry[],
   isRetry = false,
+  streaming?: { onLog?: (line: string) => void; onChunk?: (text: string) => void },
 ): Promise<AdCopy> {
   const fixContext = compileRefinePrompt(issues, errorHistory, 'refine');
   const system = `${REFINE_SYSTEM}\n\n${fixContext}${isRetry ? '\n\nCRITICAL: Return ONLY the JSON. No echo of the input copy.' : ''}`;
@@ -534,6 +786,8 @@ async function runRefine(
     temperature: 0.2,
     maxTokens: calculateMaxTokens(JSON.stringify(copy), 'refine'),
     signal: input.signal,
+    onLog: streaming?.onLog,
+    onChunk: streaming?.onChunk ? (text) => streaming.onChunk!(text) : undefined,
   });
   return parseLLMJson<AdCopy>(result.content);
 }
@@ -596,7 +850,7 @@ function clamp(n: number, min: number, max: number): number {
 
 async function handleFatal(
   err: unknown,
-  stage: 'intent',
+  stage: 'intent' | 'copy' | 'validate' | 'refine',
   attempt: number,
   stages: StageLog[],
   trace: string[],

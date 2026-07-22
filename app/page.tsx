@@ -85,6 +85,7 @@ export default function Home() {
   const [ad, setAd] = useState<AdResult | null>(null);
   const [error, setError] = useState('');
   const [running, setRunning] = useState(false);
+  const [liveEvents, setLiveEvents] = useState<ReadonlyArray<{ ts: number; line: string }>>([]);
   const [pipelineTrace, setPipelineTrace] = useState<ReadonlyArray<string>>([]);
   const [pipelineScore, setPipelineScore] = useState<number | null>(null);
   const [pipelineAttempts, setPipelineAttempts] = useState<number>(0);
@@ -144,6 +145,7 @@ export default function Home() {
     setError('');
     setAd(null);
     setRunning(true);
+    setLiveEvents([]);
     setPipelineTrace([]);
     setPipelineScore(null);
     setPipelineAttempts(0);
@@ -166,6 +168,17 @@ export default function Home() {
         onStage: (log) => {
           setPhaseStatus((prev) => ({ ...prev, [log.stage]: log.status }));
           setPhaseText((prev) => ({ ...prev, [log.stage]: log.text }));
+        },
+        onLog: (line) => {
+          setLiveEvents((prev) => [...prev, { ts: Date.now(), line }]);
+          // Cooldown countdowns come through as plain log lines; nothing
+          // extra to do — they're already shown in the live log below.
+        },
+        onChunk: () => {
+          // Live token chunks currently surface only as `[stream] done` /
+          // `[stream] ttfb` log lines via onLog. Per-phase live token
+          // preview is intentionally not rendered to keep the UI focused
+          // on the structured pipeline log + final ad copy.
         },
       });
       setAd(result.ad);
@@ -296,6 +309,22 @@ export default function Home() {
         </section>
 
         <PhaseTracker phases={PHASES} status={phaseStatus} text={phaseText} />
+
+        {(liveEvents.length > 0 || running) && (
+          <section className="card live-log">
+            <div className="live-log-head">
+              <span className="live-log-title">Live pipeline log</span>
+              {running && <span className="live-log-dot">●</span>}
+            </div>
+            <pre className="live-log-body">
+              {liveEvents.length === 0
+                ? '(waiting for the first event…)'
+                : liveEvents
+                    .map((e) => e.line)
+                    .join('\n')}
+            </pre>
+          </section>
+        )}
 
         {pipelineTrace.length > 0 && (
           <section className="trace">

@@ -480,6 +480,55 @@ select {
   color: #b91c1c;
 }
 
+/* ── Live pipeline log ─────────────────────────────────── */
+
+.live-log {
+  margin-bottom: 20px;
+  padding: 12px 16px;
+}
+
+.live-log-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.live-log-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.live-log-dot {
+  color: #22c55e;
+  animation: pulse 1s ease-in-out infinite;
+  font-size: 14px;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.live-log-body {
+  margin: 0;
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #1f2937;
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ── Badges ─────────────────────────────────────────────── */
 
 .badge {

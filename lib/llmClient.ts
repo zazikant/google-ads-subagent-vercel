@@ -1,13 +1,19 @@
 /**
- * Send a chat completion to an OpenAI-compatible endpoint.
+ * Send a chat completion to an OpenAI-compatible endpoint via streaming.
  *
- * Called from the browser; uses fetch() to the same-origin Next.js
- * route at `/api/chat` which then forwards to the upstream provider.
- * The provider's CORS headers don't matter to the browser because
- * requests go same-origin first.
+ * Calls the same-origin Next.js route at `/api/chat-stream` (Edge, SSE),
+ * which forwards the request to NVIDIA NIM / OpenCode Zen with stream:true
+ * and handles per-call retries, exponential backoff, 429 rate-limit
+ * cooldowns, and a reasoning-as-content fallback (see controlledStream.ts).
+ *
+ * The fetch consumer here parses the SSE stream, forwards structured log
+ * lines and live token chunks to the caller via `onLog` / `onChunk`, then
+ * returns the final aggregated `ChatResponse` exactly like the legacy
+ * non-streaming client — so call sites that don't care about live updates
+ * keep working unchanged.
  *
  * Per-model settings (URL, model name, timeout, max tokens, reasoning
- * effort) live in `src/lib/models.ts`.
+ * effort) live in `lib/models.ts`.
  */
 import { MODELS } from './models';
 import type {
@@ -27,10 +33,11 @@ export async function chatCompletion(
   const controller = new AbortController();
   const linked = linkSignals(controller, options.signal);
   const timeoutMs = config.timeoutMs;
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs + 10_000);
 
+  let response: Response;
   try {
-    const response = await fetch('/api/chat', {
+    response = await fetch('/api/chat-stream', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -45,36 +52,89 @@ export async function chatCompletion(
       }),
       signal: controller.signal,
     });
-
-    if (!response.ok) {
-      throw await toProxyError(response);
-    }
-
-    const data = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string | null; reasoning_content?: string | null } }>;
-      model?: string;
-      usage?: ChatResponse['usage'];
-    };
-
-    const message = data.choices?.[0]?.message;
-    const content = message?.content || message?.reasoning_content || '';
-
-    if (!content) {
-      throw new Error(
-        `${config.name} returned an empty response (both content and reasoning_content are null). ` +
-          'This usually means the model spent the whole token budget on internal reasoning.',
-      );
-    }
-
-    return {
-      content,
-      model: data.model || config.model,
-      usage: data.usage,
-    };
   } catch (err: unknown) {
+    clearTimeout(timeoutId);
+    linked.dispose();
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(
         `${config.name} request aborted (timed out after ${Math.round(timeoutMs / 1000)}s or user cancelled)`,
+        { cause: err },
+      );
+    }
+    throw err;
+  }
+
+  if (!response.ok || !response.body) {
+    clearTimeout(timeoutId);
+    linked.dispose();
+    throw await toProxyError(response);
+  }
+
+  // Parse the SSE stream.
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  let reasoning = '';
+  let model = config.model;
+  let usage: ChatResponse['usage'] | undefined;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      let nlIdx: number;
+      while ((nlIdx = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, nlIdx).trim();
+        buffer = buffer.slice(nlIdx + 1);
+        if (!line || !line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data) continue;
+
+        let event: Record<string, unknown>;
+        try {
+          event = JSON.parse(data) as Record<string, unknown>;
+        } catch {
+          continue; // partial frame; wait for more bytes
+        }
+
+        const type = event.type as string | undefined;
+        if (type === 'log') {
+          if (typeof event.line === 'string') options.onLog?.(event.line);
+        } else if (type === 'chunk') {
+          if (typeof event.text === 'string' && event.text) {
+            const isReasoning = event.reasoning === true;
+            if (isReasoning) {
+              reasoning += event.text;
+            } else {
+              content += event.text;
+            }
+            options.onChunk?.(event.text, isReasoning);
+          }
+        } else if (type === 'done') {
+          if (typeof event.content === 'string') content = event.content || content;
+          if (typeof event.reasoning === 'string') reasoning = event.reasoning;
+          if (typeof event.model === 'string') model = event.model;
+          if (event.usage && typeof event.usage === 'object') {
+            const u = event.usage as Record<string, unknown>;
+            usage = {
+              prompt_tokens: Number(u.prompt_tokens ?? 0),
+              completion_tokens: Number(u.completion_tokens ?? 0),
+              total_tokens: Number(u.total_tokens ?? 0),
+            };
+          }
+        } else if (type === 'error') {
+          const msg = typeof event.message === 'string' ? event.message : 'Upstream server error';
+          throw new Error(msg);
+        }
+      }
+    }
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(
+        `${config.name} stream aborted (timed out after ${Math.round(timeoutMs / 1000)}s or user cancelled)`,
         { cause: err },
       );
     }
@@ -83,6 +143,22 @@ export async function chatCompletion(
     clearTimeout(timeoutId);
     linked.dispose();
   }
+
+  // Reasoning-as-content fallback handled server-side, so content should
+  // always be non-empty by the time we get a `done`. Guard regardless.
+  const finalContent = content || reasoning;
+  if (!finalContent) {
+    throw new Error(
+      `${config.name} returned an empty response (both content and reasoning_content are null). ` +
+        'This usually means the model spent the whole token budget on internal reasoning.',
+    );
+  }
+
+  return {
+    content: finalContent,
+    model,
+    usage,
+  };
 }
 
 async function toProxyError(response: Response): Promise<Error> {
