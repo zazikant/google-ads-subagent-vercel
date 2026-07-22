@@ -271,7 +271,8 @@ export async function chatCompletionControlled(
       if (attempt >= maxAttempts) break;
       if (!isRetryable(status, e.message, e.name)) break;
 
-      const backoff = backoffMsFor(attempt, status, e.retryAfter ?? null);
+      const base = backoffMsFor(attempt, status, e.retryAfter ?? null);
+      const backoff = Math.round(base * (config.retryBackoffMultiplier ?? 1));
       log(opts, `retry  backing off ${backoff}ms before attempt ${attempt + 1} (status=${status || 'timeout'})`);
       await new Promise((r) => setTimeout(r, backoff));
     } finally {

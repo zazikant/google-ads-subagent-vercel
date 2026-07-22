@@ -23,6 +23,19 @@ export interface ModelConfig {
    * - undefined for non-reasoning models
    */
   readonly reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
+  /**
+   * Multiplier applied to inter-stage adaptive cooldowns.
+   * - 1   = full NVIDIA-style cooldowns (3/10/20/30s based on prior stage)
+   * - 0   = skip cooldowns entirely (fast/reliable providers)
+   * - 0.3 = short cooldowns (mild pacing)
+   */
+  readonly cooldownMultiplier?: number;
+  /**
+   * Multiplier on retry backoff sleeps. Use < 1 for fast/reliable providers
+   * that should recover quickly (OpenCode Zen), and 1 for slow providers
+   * that need longer backoff (NVIDIA NIM on 429s).
+   */
+  readonly retryBackoffMultiplier?: number;
 }
 
 export interface ChatMessage {

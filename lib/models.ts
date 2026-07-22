@@ -11,6 +11,10 @@ export const MODELS: Record<ModelId, ModelConfig> = {
     docsUrl: 'https://build.nvidia.com/openai/gpt-oss-120b',
     timeoutMs: 120_000,
     defaultMaxTokens: 2048,
+    // NVIDIA NIM is flaky + slow → full inter-stage cooldowns apply.
+    cooldownMultiplier: 1,
+    // NVIDIA NIM is slow with high TTFB → be tolerant of long waits.
+    retryBackoffMultiplier: 1,
   },
   'opencode-glm-5.1': {
     id: 'opencode-glm-5.1',
@@ -20,8 +24,15 @@ export const MODELS: Record<ModelId, ModelConfig> = {
     model: 'glm-5.1',
     reasoningEffort: 'none',
     docsUrl: 'https://opencode.ai/docs/zen',
-    timeoutMs: 50_000,
+    // OpenCode Zen is fast — don't sit on a stalled request for 50s.
+    // 25s is plenty for any reasonable completion from this model.
+    timeoutMs: 25_000,
     defaultMaxTokens: 4096,
+    // Fast + reliable → skip inter-stage cooldowns entirely. Let one
+    // stage flow straight into the next without artificial waits.
+    cooldownMultiplier: 0,
+    // Cut retry backoff to a token 200ms hop so we recover quickly.
+    retryBackoffMultiplier: 0.2,
   },
 };
 

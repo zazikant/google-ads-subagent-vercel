@@ -19,7 +19,7 @@
  */
 
 import { chatCompletion } from './llmClient';
-import { STAGE_TEMPERATURES, STAGE_MAX_TOKENS } from './models';
+import { STAGE_TEMPERATURES, STAGE_MAX_TOKENS, MODELS } from './models';
 import { cleanText, parseLLMJson } from './jsonParser';
 import type {
   AdCopy,
@@ -61,10 +61,13 @@ export const COOLDOWN_HARD_CAP_SEC = 30;
 const RATE_LIMIT_RE = /rate.?limit|429|too many requests/i;
 
 function adaptiveCooldownSec(
+  modelId: 'nvidia-gpt-oss-120b' | 'opencode-glm-5.1',
   succeeded: boolean,
   retried: boolean,
   lastErrorMsg = '',
 ): number {
+  const multiplier = MODELS[modelId].cooldownMultiplier ?? 1;
+  if (multiplier <= 0) return 0;
   let s: number;
   if (!succeeded) {
     s = RATE_LIMIT_RE.test(lastErrorMsg) ? COOLDOWN_RATE_LIMIT_SEC : COOLDOWN_FAILED_SEC;
@@ -73,6 +76,7 @@ function adaptiveCooldownSec(
   } else {
     s = COOLDOWN_FIRST_SUCCESS_SEC;
   }
+  s = Math.round(s * multiplier);
   return Math.min(s, COOLDOWN_HARD_CAP_SEC);
 }
 
@@ -335,7 +339,7 @@ async function runFastPipeline(input: PipelineInput): Promise<PipelineOutput> {
   // Inter-stage cooldown — only when the previous stage retried or failed.
   const prev = tracker.snapshot();
   if (!prev.succeeded || prev.retried) {
-    const cd = adaptiveCooldownSec(prev.succeeded, prev.retried, prev.lastErrorMsg);
+    const cd = adaptiveCooldownSec(input.modelId, prev.succeeded, prev.retried, prev.lastErrorMsg);
     if (cd > 0) {
       try {
         await interStageCooldown(cd, input.onLog, 'copy', input.signal);
@@ -462,7 +466,7 @@ async function runFullPipeline(
       // Adaptive inter-stage cooldown between intent → copy.
       const prev = tracker.snapshot();
       if (!prev.succeeded || prev.retried) {
-        const cd = adaptiveCooldownSec(prev.succeeded, prev.retried, prev.lastErrorMsg);
+        const cd = adaptiveCooldownSec(input.modelId, prev.succeeded, prev.retried, prev.lastErrorMsg);
         if (cd > 0) {
           try {
             await interStageCooldown(cd, input.onLog, 'copy', input.signal);
@@ -525,7 +529,7 @@ async function runFullPipeline(
       // Adaptive cooldown before validate (after copy finished).
       const prev = tracker.snapshot();
       if (prev.retried || !prev.succeeded) {
-        const cd = adaptiveCooldownSec(prev.succeeded, prev.retried, prev.lastErrorMsg);
+        const cd = adaptiveCooldownSec(input.modelId, prev.succeeded, prev.retried, prev.lastErrorMsg);
         if (cd > 0) {
           try {
             await interStageCooldown(cd, input.onLog, 'validate', input.signal);
@@ -595,7 +599,7 @@ async function runFullPipeline(
       // Adaptive cooldown before refine (retries are token-heavy).
       const prev = tracker.snapshot();
       if (prev.retried || !prev.succeeded) {
-        const cd = adaptiveCooldownSec(prev.succeeded, prev.retried, prev.lastErrorMsg);
+        const cd = adaptiveCooldownSec(input.modelId, prev.succeeded, prev.retried, prev.lastErrorMsg);
         if (cd > 0) {
           try {
             await interStageCooldown(cd, input.onLog, 'refine', input.signal);
