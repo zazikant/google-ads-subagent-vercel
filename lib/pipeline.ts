@@ -193,15 +193,35 @@ function compileRefinePrompt(
 
 // ─── System Prompts (one per activity) ──────────────────────────────
 
-const INTENT_SYSTEM = `You are a strategic advertising analyst. Extract the core value propositions of a product and map them to user search intent.
+const INTENT_SYSTEM = `You are a strategic advertising analyst. Extract the core value propositions of the SPECIFIC product described below and map them to user search intent.
 
-Output format (plain text, NOT JSON):
+FIDELITY RULES (critical to downstream quality):
+- Extract value props THAT ARE TRUE of the product described in the "Product:" field below, not generic value props for whatever category the product belongs to.
+- Use vocabulary from the product's actual industry/domain. If the product is construction services, talk about schedules of values, RFIs, submittals, GCs, jobsites, permits — NOT "cloud platform", "scalable data", "real-time tracking", "SaaS", "dashboards".
+- If the product is a service, surface benefits relevant to that service. If it's a physical product, surface benefits relevant to that product. Never substitute a different category's language.
+- The audience in "Audience:" is who the ad targets — your value props and keywords must appeal to THAT audience, not a generic one.
+
+Output format (plain text, NOT JSON, no code fences):
 - 3-4 core value propositions (each one short bullet)
 - Primary search intent type (informational / commercial / transactional)
-- 5 high-intent keywords
+- 5 high-intent keywords — keywords a person from the stated audience would actually search
 - One positioning statement (1 sentence)
 
 Be concise. Do NOT write ad copy yet — that comes in the next stage.`;
+
+const TONE_RULES = `TONE COMPLIANCE (read carefully):
+- The "Tone:" field below tells you which tone to write in. Match it EXACTLY.
+- "professional" = measured, factual, no hype words, no "Act Now", no exclamation-heavy CTAs, no urgency language. Calm and credible.
+- "friendly" = approachable, conversational; still no hype.
+- "urgent" = action-oriented, time-sensitive verbs ("Act Now", "Stop", "Don't Lose") ARE appropriate here.
+- "premium" = refined, status-oriented, understated luxury vocabulary. Never use "cheap" or "deal".
+- "playful" = light, witty, can use mild humor. Still professional enough for Google Ads.
+- If the tone says "professional" and you write "Act Now:" or "Stop Budget Overruns Today", that is a tone violation — score it down and flag it.
+
+INDUSTRY FIDELITY (critical):
+- Write ABOUT the specic product described in the "Product:" field. Use vocabulary from THAT product's industry.
+- If the product is a service (e.g. construction, legal, accounting), do NOT use software/SaaS/cloud vocabulary. If it's software, do NOT use professional-services vocabulary. Match the actual category.
+- Never default to generic "cloud platform" / "real-time tracking" / "scalable data" language unless that is literally what the product is.`;
 
 const COPY_SYSTEM = `You are a Google Ads copywriter.
 
@@ -211,9 +231,15 @@ Hard rules:
 - You MUST return valid JSON, no markdown, no commentary, no code fences.
 - Provide exactly 5 headlines and 2 descriptions.
 - No emojis. No excessive capitalization. No misleading superlatives.
-- Tone must match the requested brand tone.
+- Tone must match the requested brand tone — see TONE COMPLIANCE below.
+- Write ABOUT the specific product in the "Product:" field — see INDUSTRY FIDELITY below.
+- All 5 headlines must be distinct ideas. No two should be near-paraphrases of each other.
+- Descriptions must each be a complete sentence (subject + verb), not a phrase fragment.
+- The audience in "Audience:" is who the copy targets — write copy that appeals to THAT audience, not to "everyone".
 
-Return ONLY this JSON shape:
+${TONE_RULES}
+
+Return ONLY this JSON shape (fill in real copy, keep the keys):
 {"headlines":["","","","",""],"descriptions":["",""]}`;
 
 const VALIDATE_SYSTEM = `You are a Google Ads compliance AND quality reviewer.
@@ -222,9 +248,10 @@ Evaluate the supplied ad copy on a 0-1 scale. Consider:
 - Character limits (headlines <= 30, descriptions <= 90)
 - Misleading or unverifiable claims
 - Excessive capitalization or punctuation
-- Tone-product fit
+- Tone-product fit — does the copy match the "Tone:" field exactly? "Act Now" in a "professional" tone = tone violation.
 - Whether the copy actually communicates value
 - Whether each item is a distinct idea (no near-duplicates)
+- INDUSTRY FIDELITY: does the copy use vocabulary from the product's actual industry, OR does it drift into generic SaaS/cloud/software language when the product is something else? If it drifts, flag "industry drift" as an issue and provide corrected fixes in the "fixes" object.
 
 Return ONLY valid JSON, no markdown, no commentary, no code fences:
 {
@@ -243,7 +270,7 @@ Scoring:
 - 0.50-0.69: significant issues
 - below 0.50: major problems
 
-Omit the "fixes" key entirely when no fixes are needed. Be FAIR — don't invent reasons to lower the score.`;
+Omit the "fixes" key entirely when no fixes are needed. Be FAIR — don't invent reasons to lower the score. Don't lower the score for subjective taste preferences.`;
 
 const REFINE_SYSTEM = `You are a Google Ads copy refinement engine. Fix the identified issues while preserving what already works.
 
@@ -254,8 +281,12 @@ Hard rules:
 - Return the FULL corrected copy (both headlines and descriptions).
 - Preserve good copy; only change what needs changing.
 - No emojis, no excessive capitalization.
+- Tone must match the requested brand tone — see TONE COMPLIANCE below.
+- Write ABOUT the specific product in the "Product:" field — see INDUSTRY FIDELITY below. If a current headline or description drifts into generic SaaS/cloud language, REWRITE it to use the product's actual industry vocabulary.
 
-Return ONLY this JSON shape:
+${TONE_RULES}
+
+Return ONLY this JSON shape (fill in real copy, keep the keys):
 {"headlines":["","","","",""],"descriptions":["",""]}`;
 
 // ─── Public entry point ─────────────────────────────────────────────
@@ -744,7 +775,7 @@ async function runValidate(
     { role: 'system', content: VALIDATE_SYSTEM },
     {
       role: 'user',
-      content: `Copy: ${JSON.stringify(copy)}\nProduct: ${input.product}`,
+      content: `Copy: ${JSON.stringify(copy)}\nProduct: ${input.product}\nAudience: ${input.audience || 'General'}\nTone: ${input.tone}`,
     },
   ];
 
@@ -782,6 +813,7 @@ async function runRefine(
       role: 'user',
       content:
         `Issues found:\n${issues.map((i) => `- ${i}`).join('\n')}\n\n` +
+        `Product: ${input.product}\nAudience: ${input.audience || 'General'}\nTone: ${input.tone}\n\n` +
         `Current copy:\n${JSON.stringify(copy)}`,
     },
   ];
