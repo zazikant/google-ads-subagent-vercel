@@ -9,11 +9,13 @@ export const MODELS: Record<ModelId, ModelConfig> = {
     model: 'openai/gpt-oss-120b',
     reasoningEffort: 'low',
     docsUrl: 'https://build.nvidia.com/openai/gpt-oss-120b',
-    timeoutMs: 120_000,
+    timeoutMs: 25_000,
     defaultMaxTokens: 2048,
-    // NVIDIA NIM is flaky + slow → full inter-stage cooldowns apply.
+    // NVIDIA NIM is flaky → keep inter-stage cooldowns, but the per-call
+    // timeout is now short (25s, same as OpenCode). The 3-attempt retry
+    // loop in controlledStream.ts handles NIM's flakiness instead of
+    // waiting minutes on a single stalled request.
     cooldownMultiplier: 1,
-    // NVIDIA NIM is slow with high TTFB → be tolerant of long waits.
     retryBackoffMultiplier: 1,
   },
   'opencode-glm-5.1': {
