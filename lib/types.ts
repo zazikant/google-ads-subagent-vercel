@@ -69,7 +69,8 @@ export interface AdCopy {
 }
 
 export interface ValidationReport {
-  readonly score: number;
+  readonly isValid: boolean;
+  readonly qualityScore: number;
   readonly notes: string;
   readonly issues: string[];
   readonly fixes?: Record<string, string>;
