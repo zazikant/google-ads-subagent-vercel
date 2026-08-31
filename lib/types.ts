@@ -17,7 +17,8 @@ export interface ModelConfig {
   readonly defaultMaxTokens: number;
   /**
    * Value to send as `reasoning_effort` for reasoning models.
-   * - 'none' for OpenCode Zen (disables internal reasoning entirely)
+   * - 'low' for OpenCode Zen — GLM 5.3 (behind the glm-5.1 alias) is
+   *   thinking-only and rejects 'none'; 'low' keeps reasoning overhead minimal.
    * - 'low' for NVIDIA NIM gateway (lowest valid value — minimizes but does
    *   not eliminate chain-of-thought)
    * - undefined for non-reasoning models

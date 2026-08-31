@@ -10,7 +10,7 @@
  *
  * Implements the EXACT request shape used by:
  *   - D:\test\ax-translator\src\lib\nvidia-client.ts   (NVIDIA, 120s timeout)
- *   - D:\test\ax-opencode-translator\src\lib\llm-client.ts  (OpenCode, 50s, reasoning_effort="none")
+ *   - D:\test\ax-opencode-translator\src\lib\llm-client.ts  (OpenCode, 50s, reasoning_effort="low")
  */
 
 interface ChatRequest {
@@ -42,9 +42,10 @@ const PROVIDERS: Record<ChatRequest['model'], ProviderConfig> = {
     baseUrl: 'https://opencode.ai/zen/go/v1/chat/completions',
     model: 'glm-5.1',
     defaultMaxTokens: 4096,
-    // OpenCode Zen accepts 'none' (must be string, not int)
-    reasoningEffort: 'none',
-    acceptsReasoningNone: true,
+    // OpenCode Zen: gateway now serves GLM 5.3 (thinking-only) behind glm-5.1,
+    // which rejects 'none'. Use 'low' (must be string, not int).
+    reasoningEffort: 'low',
+    acceptsReasoningNone: false,
   },
 };
 
