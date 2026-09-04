@@ -32,7 +32,7 @@ interface ProviderConfig {
 const PROVIDERS: Record<ChatRequest['model'], ProviderConfig> = {
   'nvidia-gpt-oss-120b': {
     baseUrl: 'https://integrate.api.nvidia.com/v1/chat/completions',
-    model: 'openai/gpt-oss-120b',
+    model: 'openai/gpt-oss-20b',
     defaultMaxTokens: 2048,
     // NVIDIA gateway rejects 'none' — valid values: 'low' | 'medium' | 'high'
     reasoningEffort: 'low',

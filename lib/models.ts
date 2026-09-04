@@ -6,7 +6,7 @@ export const MODELS: Record<ModelId, ModelConfig> = {
     name: 'NVIDIA GPT-OSS-120B',
     description: 'OpenAI GPT-OSS-120B served via NVIDIA NIM (integrate.api.nvidia.com). Low reasoning effort.',
     baseUrl: 'https://integrate.api.nvidia.com/v1/chat/completions',
-    model: 'openai/gpt-oss-120b',
+    model: 'openai/gpt-oss-20b',
     reasoningEffort: 'low',
     docsUrl: 'https://build.nvidia.com/openai/gpt-oss-120b',
     timeoutMs: 120_000,

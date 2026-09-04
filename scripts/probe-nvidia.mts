@@ -8,7 +8,7 @@ if (!KEY) {
 }
 
 const candidates = [
-  'openai/gpt-oss-120b',
+  'openai/gpt-oss-20b',
   'openai/gpt-oss-20b',
   'meta/llama-3.1-70b-instruct',
   'meta/llama-3.1-8b-instruct',
