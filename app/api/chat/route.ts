@@ -11,7 +11,13 @@
  * Implements the EXACT request shape used by:
  *   - D:\test\ax-translator\src\lib\nvidia-client.ts   (NVIDIA, 120s timeout)
  *   - D:\test\ax-opencode-translator\src\lib\llm-client.ts  (OpenCode, 50s, reasoning_effort="low")
+ *
+ * OpenCode gateway additionally requires `x-opencode-session` for routing
+ * (enforcement tightened 2026-09-06). NVIDIA does not require it.
+ * See https://opencode.ai/docs/go/#where-can-i-use-it
  */
+
+import { randomUUID } from 'node:crypto';
 
 interface ChatRequest {
   model: 'nvidia-gpt-oss-120b' | 'opencode-glm-5.1';
@@ -109,13 +115,21 @@ export async function POST(req: Request): Promise<Response> {
     upstreamBody.reasoning_effort = config.reasoningEffort;
   }
 
+  // Build upstream headers. OpenCode Zen requires x-opencode-session for
+  // routing (HTTP 400 MissingSessionID otherwise); NVIDIA does not.
+  const isOpenCode = config.baseUrl.includes('opencode.ai');
+  const upstreamHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+  };
+  if (isOpenCode) {
+    upstreamHeaders['x-opencode-session'] = randomUUID();
+  }
+
   try {
     const upstream = await fetch(config.baseUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: upstreamHeaders,
       body: JSON.stringify(upstreamBody),
     });
 
