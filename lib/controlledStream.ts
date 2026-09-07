@@ -20,6 +20,7 @@
  */
 import { MODELS } from './models';
 import type { ChatMessage, ModelId } from './types';
+import { randomUUID } from 'node:crypto';
 
 export interface ControlledStreamOptions {
   modelId: ModelId;
@@ -106,13 +107,21 @@ async function streamOnce(
   sawDone: boolean;
 }> {
   const callStart = Date.now();
+  // OpenCode Zen requires x-opencode-session for routing — see
+  // https://opencode.ai/docs/go/#where-can-i-use-it (enforcement tightened
+  // 2026-09-06). NVIDIA NIM does not require this header.
+  const isOpenCode = url.includes('opencode.ai');
+  const upstreamHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+    Accept: 'text/event-stream',
+  };
+  if (isOpenCode) {
+    upstreamHeaders['x-opencode-session'] = randomUUID();
+  }
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      Accept: 'text/event-stream',
-    },
+    headers: upstreamHeaders,
     body: JSON.stringify({ ...body, stream: true }),
     signal,
   });
