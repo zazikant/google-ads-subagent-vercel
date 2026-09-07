@@ -20,7 +20,13 @@
  */
 import { MODELS } from './models';
 import type { ChatMessage, ModelId } from './types';
-import { randomUUID } from 'node:crypto';
+
+/**
+ * Generate a UUID via Web Crypto. The /api/chat-stream route runs on the
+ * Edge Runtime, which cannot import 'node:crypto'. `crypto.randomUUID()` is
+ * available globally in Edge and Node 19+.
+ */
+const newSessionId = (): string => crypto.randomUUID();
 
 export interface ControlledStreamOptions {
   modelId: ModelId;
@@ -117,7 +123,7 @@ async function streamOnce(
     Accept: 'text/event-stream',
   };
   if (isOpenCode) {
-    upstreamHeaders['x-opencode-session'] = randomUUID();
+    upstreamHeaders['x-opencode-session'] = newSessionId();
   }
   const response = await fetch(url, {
     method: 'POST',
