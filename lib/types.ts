@@ -1,4 +1,4 @@
-export type ModelId = 'nvidia-gpt-oss-120b' | 'opencode-glm-5.1';
+export type ModelId = 'nvidia-gpt-oss-120b' | 'opencode-glm-5.2';
 
 export type StageId = 'intent' | 'copy' | 'validate' | 'refine';
 
@@ -17,7 +17,7 @@ export interface ModelConfig {
   readonly defaultMaxTokens: number;
   /**
    * Value to send as `reasoning_effort` for reasoning models.
-   * - 'low' for OpenCode Zen — GLM 5.3 (behind the glm-5.1 alias) is
+   * - 'low' for OpenCode Zen — GLM 5.3 (behind the glm-5.2 alias) is
    *   thinking-only and rejects 'none'; 'low' keeps reasoning overhead minimal.
    * - 'low' for NVIDIA NIM gateway (lowest valid value — minimizes but does
    *   not eliminate chain-of-thought)

@@ -42,7 +42,7 @@ function loadConfig(): PersistedConfig {
     if (!raw) return { modelId: DEFAULT_MODEL, apiKey: '', mode: 'full' };
     const parsed = JSON.parse(raw) as Partial<PersistedConfig>;
     return {
-      modelId: parsed.modelId === 'opencode-glm-5.1' ? 'opencode-glm-5.1' : DEFAULT_MODEL,
+      modelId: parsed.modelId === 'opencode-glm-5.2' ? 'opencode-glm-5.2' : DEFAULT_MODEL,
       apiKey: typeof parsed.apiKey === 'string' ? parsed.apiKey : '',
       mode: parsed.mode === 'fast' ? 'fast' : 'full',
     };

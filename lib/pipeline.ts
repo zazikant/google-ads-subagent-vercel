@@ -60,7 +60,7 @@ export const COOLDOWN_HARD_CAP_SEC = 30;
 const RATE_LIMIT_RE = /rate.?limit|429|too many requests/i;
 
 function adaptiveCooldownSec(
-  modelId: 'nvidia-gpt-oss-120b' | 'opencode-glm-5.1',
+  modelId: 'nvidia-gpt-oss-120b' | 'opencode-glm-5.2',
   succeeded: boolean,
   retried: boolean,
   lastErrorMsg = '',
