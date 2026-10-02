@@ -291,7 +291,6 @@ export async function chatCompletionControlled(
   // Loop: original call (round 0) + up to maxContinuations continuation rounds.
   for (let round = 0; round <= maxContinuations; round++) {
     let roundResult: { content: string; reasoning: string; ttfbMs: number | null; sawDone: boolean; finishReason: string | null } | null = null;
-    let roundFatal = false;
 
     // ─── Per-round retry loop (handles transient errors) ───────────
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -348,8 +347,8 @@ export async function chatCompletionControlled(
           );
         }
 
-        if (attempt >= maxAttempts) { roundFatal = true; break; }
-        if (!isRetryable(status, e.message, e.name)) { roundFatal = true; break; }
+        if (attempt >= maxAttempts) break;
+        if (!isRetryable(status, e.message, e.name)) break;
 
         const base = backoffMsFor(attempt, status, e.retryAfter ?? null);
         const backoff = Math.round(base * (config.retryBackoffMultiplier ?? 1));
@@ -381,7 +380,7 @@ export async function chatCompletionControlled(
     // Reasoning-as-content fallback: if the model returned only
     // reasoning_content (no content), surface it as content.
     let roundContent = roundResult.content;
-    let roundReasoning = roundResult.reasoning;
+    const roundReasoning = roundResult.reasoning;
     if (!roundContent && roundReasoning) {
       log(opts, `round=${round} empty content — using ${roundReasoning.length} chars of reasoning as content`);
       roundContent = roundReasoning;
