@@ -14,7 +14,7 @@ import { MODELS } from '@/lib/models';
  *   data: {"type":"log","line":"[stream] start provider=...","ts":...}
  *   data: {"type":"chunk","text":"Hello","reasoning":false,"ts":...}
  *   data: {"type":"chunk","text":"...","reasoning":true,"ts":...}
- *   data: {"type":"done","content":"...","reasoning":"...","model":"...","elapsedMs":1234,"attempts":1,"usage":null,"ts":...}
+ *   data: {"type":"done","content":"...","reasoning":"...","model":"...","elapsedMs":1234,"attempts":1,"continuations":0,"truncated":false,"usage":null,"ts":...}
  *   data: {"type":"error","message":"...","ts":...}
  *
  * Why this endpoint:
@@ -28,6 +28,12 @@ import { MODELS } from '@/lib/models';
  *     - Up to 3 attempts with exponential backoff (500ms, 1s, 2s)
  *     - 429 rate-limit aware: 5s / 15s / 30s backoff, Retry-After honoured
  *     - Reasoning-as-content fallback when only reasoning_content returned
+ *     - Auto-continue on finish_reason:'length' — when the model hits
+ *       max_tokens mid-generation, automatically sends another call with
+ *       the partial output appended as an assistant message + a generic
+ *       "continue from where you left off" user prompt, then concatenates.
+ *       The browser sees continuous streaming with no visible boundary
+ *       between the original call and continuation(s). Capped at 3 rounds.
  *
  * Edge runtime: required for streaming + long-lived requests on Vercel.
  * maxDuration 120s matches NVIDIA's timeout (slowest provider).
@@ -101,6 +107,8 @@ export async function POST(req: NextRequest): Promise<Response> {
           model: result.model,
           elapsedMs: result.elapsedMs,
           attempts: result.attempts,
+          continuations: result.continuations,
+          truncated: result.truncated,
           usage: null,
         });
       } catch (err: unknown) {
