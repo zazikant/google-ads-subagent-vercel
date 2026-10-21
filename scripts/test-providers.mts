@@ -14,7 +14,7 @@ interface TestResult {
 }
 
 async function testProvider(
-  provider: 'nvidia-gpt-oss-120b' | 'opencode-glm-5.1',
+  provider: 'nvidia-gpt-oss-120b' | 'opencode-glm-5.3',
   apiKey: string,
 ): Promise<TestResult> {
   const start = Date.now();
@@ -60,7 +60,7 @@ if (!nvidiaKey && !opencodeKey) {
 
 const results: TestResult[] = [];
 if (nvidiaKey) results.push(await testProvider('nvidia-gpt-oss-120b', nvidiaKey));
-if (opencodeKey) results.push(await testProvider('opencode-glm-5.1', opencodeKey));
+if (opencodeKey) results.push(await testProvider('opencode-glm-5.3', opencodeKey));
 
 console.log('\n=== Live API integration test ===\n');
 for (const r of results) {

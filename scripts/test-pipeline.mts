@@ -8,7 +8,7 @@ const PRODUCT = 'Cloud project management software for remote teams. Real-time c
 const AUDIENCE = 'Startup founders at SMBs (5-50 employees)';
 const TONE = 'professional';
 
-async function test(modelId: 'nvidia-gpt-oss-120b' | 'opencode-glm-5.1', apiKey: string) {
+async function test(modelId: 'nvidia-gpt-oss-120b' | 'opencode-glm-5.3', apiKey: string) {
   console.log(`\n=== Full pipeline via ${modelId} ===`);
   const start = Date.now();
   const result = await runPipeline({
@@ -64,7 +64,7 @@ if (!nvidiaKey && !opencodeKey) {
 
 try {
   if (nvidiaKey) await test('nvidia-gpt-oss-120b', nvidiaKey);
-  if (opencodeKey) await test('opencode-glm-5.1', opencodeKey);
+  if (opencodeKey) await test('opencode-glm-5.3', opencodeKey);
 } catch (e) {
   console.error('Test failed:', e);
   process.exit(1);
