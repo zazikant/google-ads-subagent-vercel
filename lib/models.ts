@@ -17,12 +17,12 @@ export const MODELS: Record<ModelId, ModelConfig> = {
     cooldownMultiplier: 1,
     retryBackoffMultiplier: 1,
   },
-  'opencode-glm-5.2': {
-    id: 'opencode-glm-5.2',
-    name: 'OpenCode Zen — GLM 5.1',
-    description: 'GLM 5.1 via opencode.ai/zen/go. Gateway now serves GLM 5.3 behind the glm-5.2 alias, which is thinking-only — uses reasoning_effort "low" to keep reasoning overhead minimal.',
+  'opencode-glm-5.3': {
+    id: 'opencode-glm-5.3',
+    name: 'OpenCode Zen — GLM 5.3',
+    description: 'GLM 5.3 via opencode.ai/zen/go. Thinking-only model — uses reasoning_effort "low" to keep reasoning overhead minimal.',
     baseUrl: 'https://opencode.ai/zen/go/v1/chat/completions',
-    model: 'glm-5.2',
+    model: 'glm-5.3',
     reasoningEffort: 'low',
     docsUrl: 'https://opencode.ai/docs/zen',
     // OpenCode Zen is fast — don't sit on a stalled request for 50s.

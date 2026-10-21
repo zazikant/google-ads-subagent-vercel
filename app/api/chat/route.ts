@@ -20,7 +20,7 @@
 import { randomUUID } from 'node:crypto';
 
 interface ChatRequest {
-  model: 'nvidia-gpt-oss-120b' | 'opencode-glm-5.2';
+  model: 'nvidia-gpt-oss-120b' | 'opencode-glm-5.3';
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   maxTokens?: number;
   temperature?: number;
@@ -44,12 +44,12 @@ const PROVIDERS: Record<ChatRequest['model'], ProviderConfig> = {
     reasoningEffort: 'low',
     acceptsReasoningNone: false,
   },
-  'opencode-glm-5.2': {
+  'opencode-glm-5.3': {
     baseUrl: 'https://opencode.ai/zen/go/v1/chat/completions',
-    model: 'glm-5.2',
+    model: 'glm-5.3',
     defaultMaxTokens: 4096,
-    // OpenCode Zen: gateway now serves GLM 5.3 (thinking-only) behind glm-5.2,
-    // which rejects 'none'. Use 'low' (must be string, not int).
+    // OpenCode Zen: GLM 5.3 is thinking-only and rejects 'none'.
+    // Use 'low' (must be string, not int).
     reasoningEffort: 'low',
     acceptsReasoningNone: false,
   },
