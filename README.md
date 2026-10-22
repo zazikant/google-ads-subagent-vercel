@@ -106,3 +106,41 @@ and
   has a model-specific timeout.
 - **Fast mode** — single-pass `intent → copy` for Vercel Hobby plan or
   when speed matters more than validation.
+
+## AX DSPy Pipeline — Provenance
+
+Ported **word-to-word** from the "Bible" repo
+[`atomic-graph-opencode`](https://github.com/zazikant/atomic-graph-opencode)
+(`src/lib/axPipeline.ts` + `src/lib/opencodeClient.ts`) — same port
+methodology already applied to `ax-opencode-translator`, `ax-translator`,
+`gsap-animation-pipeline`, `tradingview-notes-app`, and `Dspy-app`.
+Only the activity changes (knowledge-graph extraction → Google Ads copy);
+the DSPy scaffolding is identical.
+
+```
+intent → copy → validate ──(score ≥ 0.75)──► done
+                  ▲                │
+                  └── refine ◄─────┘   (compiled DSPy fix context, ≤ maxRefinements)
+```
+
+| Bible pattern | Where here |
+|---|---|
+| `isEcho()` — `<10`-char guard, prefix-200 overlap, 0.5 length ratio | `lib/pipeline.ts` (verbatim) |
+| `compileRefinePrompt()` — issues + error history → surgical context | `lib/pipeline.ts` (verbatim) |
+| `callWithRetryAwareness()` — rate-limit/transient detection + friendly messages, records `ErrorEntry` history | `lib/pipeline.ts` (verbatim, free function) |
+| `recoverTruncatedJSON()` — closeOpenBrackets → truncateToLastCompleteElement → recoverFieldsIndividually | `lib/jsonParser.ts` (verbatim, fields adapted to ad copy) |
+| `chatJSON` parse-then-recover chain | `parseLLMJsonWithRecovery()` in `lib/jsonParser.ts` |
+| Stage temperatures (0.3 generation / 0.1 validate / 0.2 refine) | `lib/models.ts` (unchanged — already matched) |
+| `calculateMaxTokens` — validate fixed 1024, floor 2048, cap 8192 | `lib/pipeline.ts` (verbatim) |
+| `run()` state machine — `while (attempt < max && score < threshold)`, `VALIDATION_THRESHOLD = 0.75`, results carried forward | `runFullPipeline()` (Bible shape; score 0-1 internally, `PipelineOutput.score` stays 0-1) |
+| `runFast()` — estimated 0.85, echo-retry on generation stages | `runFastPipeline()` |
+
+**Documented deviation** (same as the other ports): the per-call transport
+retry stays in `lib/controlledStream.ts` (3 attempts, 429-aware backoff,
+provider-tuned for browser SSE responsiveness) instead of the Bible proxy
+route's 15-second delay loop; `callWithRetryAwareness` provides the Bible's
+error-awareness layer on top.
+
+External contract unchanged: `runPipeline(input) → PipelineOutput`
+(`ad`, `stages`, `pipeline`, `score`, `attempts`, `refinements`, `mode`),
+`StageLog`, `AdResult`, both API routes, and the UI.

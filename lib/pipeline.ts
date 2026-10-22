@@ -1,30 +1,47 @@
 /**
  * AX DSPy-style pipeline for Google Ads copy generation.
  *
- * Mirrors the structure of `ax-translator/src/lib/translation-pipeline.ts`
- * pattern-for-pattern — only the specific activity (translation vs ad copy)
- * changes. The DSPy-like scaffolding is identical:
+ * Ported word-to-word from the "Bible" repo atomic-graph-opencode
+ * (src/lib/axPipeline.ts + src/lib/opencodeClient.ts) — same methodology as
+ * the ax-opencode-translator / ax-translator / gsap-animation-pipeline /
+ * tradingview-notes-app / Dspy-app ports. The DSPy-like scaffolding is
+ * identical to the Bible; only the specific activity (knowledge-graph
+ * extraction vs Google Ads copy) changes:
  *
  *   - ErrorEntry tracking — full error history for surgical retries
- *   - compilePrompt() — pure DSPy `Module.compile()` analog, called ONLY
- *     on retries / refinements (never on the initial call)
- *   - isEcho() — detect LLM echoing the input
- *   - resumeFrom state machine: deterministic stage progression
+ *   - callWithRetryAwareness() — rate-limit / transient error detection with
+ *     friendly messaging, records to errorHistory (Bible verbatim)
+ *   - compileRefinePrompt() — pure DSPy `Module.compile()` analog, called ONLY
+ *     on retries / refinements (never on the initial call) — Bible verbatim
+ *   - isEcho() — detect LLM echoing the input (Bible verbatim: <10-char guard,
+ *     prefix-200 overlap, 0.5 length ratio)
+ *   - recoverTruncatedJSON() — 3-layer truncation recovery chain
+ *     (closeOpenBrackets → truncateToLastCompleteElement →
+ *     recoverFieldsIndividually) via parseLLMJsonWithRecovery — Bible verbatim
+ *   - resumeFrom state machine: deterministic stage progression, Bible shape
+ *     `while (attempt < maxAttempts && score < threshold && resumeFrom !== 'done')`
+ *     with VALIDATION_THRESHOLD = 0.75 (score carried in the Bible's 0-1 domain;
+ *     PipelineOutput.score stays 0-1 so the UI contract is unchanged)
  *   - Activity-style discrete steps:
- *       intent → copy → validate → (if !isValid) refine → revalidate → done
- *   - Validator returns `isValid: boolean` so the orchestrator branches on
- *     validity, not on a numeric threshold (ax-translator's exact shape)
- *   - Validate-after-refine checks `isValid && !isEcho` before exiting
- *   - Stage-specific temperatures + dynamic max_tokens
+ *       intent → copy → validate → (if score < threshold) refine → revalidate → done
+ *   - Stage-specific temperatures + dynamic max_tokens (validate fixed 1024,
+ *     floor 2048, cap 8192 — Bible verbatim)
+ *
+ * Deliberate deviation (documented, same as the other ports): the per-call
+ * transport retry stays in controlledStream.ts (3 attempts, 429-aware
+ * backoff, provider-tuned) instead of the Bible proxy route's 15s-delay
+ * loop — the browser-side SSE transport needs fast backoff to keep the UI
+ * responsive. callWithRetryAwareness above it provides the Bible's
+ * error-awareness layer.
  *
  * Two modes:
- *   - fast: intent → copy, no validate/refine
- *   - full: full state machine with validate→refine loop (max 2 refinements)
+ *   - fast: intent → copy, no validate/refine (Bible runFast: estimated 0.85)
+ *   - full: full state machine with validate→refine loop
  */
 
 import { chatCompletion } from './llmClient';
-import { STAGE_TEMPERATURES, STAGE_MAX_TOKENS, MODELS } from './models';
-import { cleanText, parseLLMJson } from './jsonParser';
+import { STAGE_TEMPERATURES, MODELS } from './models';
+import { cleanText, parseLLMJsonWithRecovery } from './jsonParser';
 import type {
   AdCopy,
   AdResult,
@@ -148,74 +165,133 @@ function estimateTokens(text: string): number {
   return Math.ceil(cjkChars / 2 + otherChars / 4);
 }
 
-function calculateMaxTokens(
+export function calculateMaxTokens(
   inputText: string,
   stage: 'intent' | 'copy' | 'validate' | 'refine',
 ): number {
+  // Validation returns small JSON — fixed 1024 is enough (Bible verbatim)
   if (stage === 'validate') return 1024;
+
   const inputTokens = estimateTokens(inputText);
+  // Generation stages (intent/copy ≈ Bible 'extract') produce structured
+  // output ≈ 2× input; refine output ≈ 1.5× the copy it is fixing.
   const multiplier = stage === 'intent' || stage === 'copy' ? 2 : 1.5;
   const outputTokens = Math.ceil(inputTokens * multiplier);
-  const cap = stage === 'refine' ? 8192 : 4096;
-  return Math.max(2048, Math.min(cap, outputTokens));
+  return Math.max(2048, Math.min(8192, outputTokens));
 }
 
-// ─── Echo Detection ────────────────────────────────────────────────
+// ─── Echo Detection (Bible verbatim) ───────────────────────────────
+// Ported word-to-word from atomic-graph-opencode axPipeline.ts isEcho().
 
-function isEcho(original: string, generated: string): boolean {
-  const normalize = (s: string) =>
-    s
-      .trim()
-      .toLowerCase()
-      .replace(/\s+/g, ' ')
-      .slice(0, 240);
-  const a = normalize(original);
-  const b = normalize(generated);
-  if (a.length < 20 || b.length < 20) return false;
-  return a === b || b.includes(a) || a.includes(b);
+export function isEcho(original: string, generated: string): boolean {
+  const normalize = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+  // Check if the generated text is mostly the same as the input
+  // (LLM sometimes just echoes input instead of doing the activity)
+  const normOrig = normalize(original);
+  const normGen = normalize(generated);
+  // If the generated text is >80% similar to the input, it's an echo
+  if (normGen.length < 10) return false; // Too short to be meaningful
+  const overlap = normOrig.includes(normGen.substring(0, Math.min(200, normGen.length)));
+  return overlap && normGen.length > normOrig.length * 0.5;
 }
 
-// ─── compilePrompt — pure function (DSPy Module.compile analog) ───
-// Same shape as ax-translator's compileTranslatePrompt. ONLY invoked on
-// retries and refinement iterations — never on the initial activity call.
-// Produces a focused context string appended to the system prompt that
-// reminds the model what failed last time so it doesn't repeat the pattern.
+// ─── compileRefinePrompt — pure function (DSPy Module.compile analog) ─
+// Bible verbatim (atomic-graph-opencode axPipeline.ts compileRefinePrompt).
+// Like DSPy's Module.compile() — produces focused prompts based on error
+// history. This is the ONLY place refinement prompt construction happens.
+// ONLY invoked on retries and refinement iterations — never on the initial
+// activity call.
 
-function compilePrompt(
-  input: PipelineInput,
+export function compileRefinePrompt(
+  issues: string[],
   errorHistory: ErrorEntry[],
   stage: 'intent' | 'copy' | 'validate' | 'refine',
 ): string {
-  if (errorHistory.length === 0) {
+  // No errors yet — this is initial context
+  if (errorHistory.length === 0 && issues.length === 0) {
     return `Initial ${stage} request for Google Ads copy generation`;
   }
 
-  const latestError = errorHistory[errorHistory.length - 1];
-  const previousErrors = errorHistory.slice(0, -1).map((e) =>
-    `  Attempt ${e.attempt} | ${e.stage}: ${e.error.substring(0, 200)}`,
+  // Build surgical context from error history (Mode B: surgical fix)
+  const latestError = errorHistory.length > 0
+    ? errorHistory[errorHistory.length - 1]
+    : null;
+  const previousErrors = errorHistory.slice(0, -1).map(e =>
+    `  Attempt ${e.attempt} | ${e.stage}: ${e.error.substring(0, 200)}`
   ).join('\n');
 
-  const issueContext = latestError.issues && latestError.issues.length > 0
-    ? `\nIssues: ${latestError.issues.join(', ')}`
+  const issueContext = issues.length > 0
+    ? `\nValidation issues to fix:\n${issues.map(i => `  - ${i}`).join('\n')}`
     : '';
 
   const errorContext = latestError
-    ? `\nLatest issue (attempt ${latestError.attempt}, stage ${latestError.stage}): ${latestError.error.substring(0, 300)}${issueContext}`
+    ? `\nLatest error (attempt ${latestError.attempt}, stage ${latestError.stage}): ${latestError.error.substring(0, 300)}\n${latestError.issues ? `Issues: ${latestError.issues.join(', ')}` : ''}`
     : '';
 
   const previousContext = previousErrors.length > 0
-    ? `\nPrevious attempts — do NOT repeat these patterns:\n${previousErrors}`
+    ? `\nPrevious errors — do NOT repeat these patterns:\n${previousErrors}`
     : '';
 
-  const productContext = `\nProduct: ${input.product.substring(0, 200)}\nAudience: ${input.audience || 'General'}\nTone: ${input.tone}`;
-
-  return `Refinement context for stage "${stage}":${errorContext}${previousContext}${productContext}`;
+  return `Refinement context for stage "${stage}":${issueContext}${errorContext}${previousContext}`;
 }
 
-// ─── System Prompts (one per activity, ax-translator pattern) ─────
-// Each prompt is focused on its activity only. The compilePrompt context
-// is applied to the SYSTEM prompt only on retries — initial calls keep
-// the system prompt as-is. (Mirrors ax-translator's translateActivity.)
+// ─── callWithRetryAwareness (Bible verbatim) ───────────────────────
+// Wrap an async API call with rate-limit / transient error detection.
+// Records errors to errorHistory for DSPy-style compileRefinePrompt().
+// Ported word-to-word from atomic-graph-opencode axPipeline.ts
+// AXPipeline.callWithRetryAwareness — as a free function here because this
+// pipeline is functional, not class-based. Friendly messages surface via
+// onLog (the Bible emits them through its iteration callback).
+
+export async function callWithRetryAwareness<T>(
+  fn: () => Promise<T>,
+  attempt: number,
+  phaseLabel: string,
+  stage: ErrorEntry['stage'],
+  errorHistory: ErrorEntry[],
+  onLog?: (line: string) => void,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+
+    // Track error in history for DSPy-style compiled prompts
+    errorHistory.push({
+      attempt,
+      stage,
+      error: msg,
+    });
+
+    const isRateLimit =
+      msg.includes('rate limit') ||
+      msg.includes('Rate limit') ||
+      msg.includes('429') ||
+      msg.includes('retry attempt') ||
+      msg.includes('too many requests');
+
+    const isTransient =
+      msg.includes('server error') ||
+      msg.includes('Server Error') ||
+      msg.includes('502') ||
+      msg.includes('503') ||
+      msg.includes('504') ||
+      msg.includes('temporary');
+
+    if (isRateLimit) {
+      onLog?.(`Rate limited during ${phaseLabel} — all proxy retries exhausted. Please wait and try again.`);
+    } else if (isTransient) {
+      onLog?.(`Transient server error during ${phaseLabel} — all proxy retries exhausted. Try again shortly.`);
+    }
+
+    throw error;
+  }
+}
+
+// ─── System Prompts (one per activity) ────────────────────────────
+// Each prompt is focused on its activity only. The compileRefinePrompt
+// context is applied to the SYSTEM prompt only on retries — initial calls
+// keep the system prompt as-is.
 
 const INTENT_SYSTEM = `You are a strategic advertising analyst. Extract the core value propositions of a product and map them to user search intent.
 
@@ -240,22 +316,19 @@ Hard rules:
 Return ONLY this JSON shape:
 {"headlines":["","","","",""],"descriptions":["",""]}`;
 
-const VALIDATE_SYSTEM = `You are a Google Ads compliance AND quality reviewer.
+const VALIDATE_SYSTEM = `You are a Google Ads quality reviewer. Evaluate the provided ad copy and respond in JSON format.
 
-Evaluate the supplied ad copy and respond in JSON format.
-
-Evaluate on these criteria:
-1. Character limits: headlines <= 30, descriptions <= 90
-2. Accuracy: no misleading or unverifiable claims
-3. Capitalization/punctuation: not excessive
-4. Tone-product fit: does the copy match the requested brand tone?
-5. Value: does the copy communicate value of the described product?
-6. Distinctness: each item is a distinct idea, no near-duplicates
+Evaluate on these criteria (weight: compliance & accuracy > character limits > tone fit > value clarity > distinctness):
+1. COMPLIANCE & ACCURACY: No misleading or unverifiable claims? Google Ads policy safe?
+2. CHARACTER LIMITS: Headlines <= 30 chars, descriptions <= 90 chars?
+3. TONE FIT: Does the copy match the requested brand tone?
+4. VALUE CLARITY: Does the copy communicate the product's value?
+5. DISTINCTNESS: Each item a distinct idea, no near-duplicates?
 
 Respond in this exact JSON format:
 {
-  "isValid": true/false,
-  "qualityScore": 0-100,
+  "isValid": true,
+  "qualityScore": 85,
   "notes": "short summary",
   "issues": ["issue1", "issue2"],
   "fixes": {
@@ -264,27 +337,30 @@ Respond in this exact JSON format:
   }
 }
 
+Scoring (qualityScore 0-100):
+- 90-100: Production-ready, minor wording differences only
+- 75-89: Minor gaps
+- 50-74: Significant gaps
+- 0-49: Major problems
+
 Set isValid to true if the copy is good enough for production use, even
 if minor improvements are possible. Omit the "fixes" key when no fixes
-are needed. Be FAIR — don't invent reasons to lower the score.
+are needed.
 
-qualityScore bands:
-- 85-100: production-ready
-- 70-84: minor issues, easy to fix
-- 50-69: significant issues
-- below 50: major problems`;
+Be FAIR — good copy = high score. Don't invent reasons to lower it.
+Only list issues affecting COMPLIANCE, LIMITS, or QUALITY.`;
 
-const REFINE_SYSTEM = `You are a Google Ads copy refinement engine.
+const REFINE_SYSTEM = `You are a Google Ads copy refinement engine. Fix the identified issues while preserving what already works.
+Output ONLY the corrected ad copy in JSON, nothing else.
 
-Fix ALL the issues identified while keeping the rest of the copy unchanged. Output ONLY the improved JSON copy, nothing else.
-
-Hard rules:
-- Each headline MUST be <= 30 characters.
-- Each description MUST be <= 90 characters.
-- You MUST return valid JSON, no markdown, no commentary, no code fences.
-- Return the FULL corrected copy (both headlines and descriptions).
-- Preserve good copy; only change what needs changing.
-- No emojis, no excessive capitalization.
+CRITICAL OUTPUT RULES:
+- Always respond with valid JSON only. No markdown, no explanation, no code fences.
+- Every response must be a single valid JSON object parseable by JSON.parse().
+- Preserve good copy wording where accurate — only fix problems the issues list names.
+- Headline over 30 characters? SHORTEN it.
+- Description over 90 characters? SHORTEN it.
+- Misleading or unverifiable claim? Replace it with an accurate one.
+- No emojis. No excessive capitalization. No speculative additions.
 
 Return ONLY this JSON shape:
 {"headlines":["","","","",""],"descriptions":["",""]}`;
@@ -294,6 +370,13 @@ Return ONLY this JSON shape:
 const STAGE_ORDER: ReadonlyArray<StageId> = ['intent', 'copy', 'validate', 'refine'];
 const DEFAULT_MAX_REFINEMENTS = 2;
 
+// Exports below are for smoke-test verification; runtime behavior unchanged.
+// Bible verbatim (ax-opencode-translator / ax-translator lineage):
+// score below this → refine. The score is carried in the Bible's 0-1 domain
+// internally; PipelineOutput.score keeps the same 0-1 domain (UI multiplies
+// by 100), so the external contract is unchanged.
+export const VALIDATION_THRESHOLD = 0.75;
+
 export async function runPipeline(input: PipelineInput): Promise<PipelineOutput> {
   const mode: PipelineMode = input.mode ?? 'full';
   const maxRefinements = input.maxRefinements ?? DEFAULT_MAX_REFINEMENTS;
@@ -302,8 +385,8 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutput>
 }
 
 // ─── Activity 1: runIntent ────────────────────────────────────────
-// Mirrors ax-translator's translateText: isRetry toggles a more forceful
-// system prompt; the compilePrompt context is appended only on retries.
+// Mirrors the Bible's extract(): isRetry toggles a more forceful
+// system prompt; the compileRefinePrompt context is appended only on retries.
 
 type StreamingCb = { onLog?: (line: string) => void; onChunk?: (text: string) => void };
 
@@ -366,11 +449,13 @@ async function runCopy(
     onLog: streaming?.onLog,
     onChunk: streaming?.onChunk ? (text) => streaming.onChunk!(text) : undefined,
   });
-  return parseLLMJson<AdCopy>(result.content);
+  return parseLLMJsonWithRecovery<AdCopy>(result.content);
 }
 
 // ─── Activity 3: runValidate ──────────────────────────────────────
-// Returns isValid + qualityScore, exactly like ax-translator's validator.
+// Returns isValid + qualityScore (0-100); the state machine compares
+// qualityScore/100 against VALIDATION_THRESHOLD — the Bible's exact
+// threshold branch (passed = score >= threshold).
 
 async function runValidate(
   input: PipelineInput,
@@ -387,13 +472,14 @@ async function runValidate(
 
   const result = await chatCompletion(input.modelId, input.apiKey, messages, {
     temperature: STAGE_TEMPERATURES.compliance ?? 0.1,
-    maxTokens: STAGE_MAX_TOKENS.compliance,
+    maxTokens: calculateMaxTokens('', 'validate'), // Returns 1024 for validate (Bible verbatim)
     signal: input.signal,
     onLog: streaming?.onLog,
     onChunk: streaming?.onChunk ? (text) => streaming.onChunk!(text) : undefined,
   });
 
-  const parsed = parseLLMJson<ValidationReport>(result.content);
+  // Bible chatJSON pattern: parseLLMJson first, then truncation recovery.
+  const parsed = parseLLMJsonWithRecovery<ValidationReport>(result.content);
   // Tolerate legacy models that returned "score" (0-1) instead of "qualityScore" (0-100).
   const legacyRaw = parsed as unknown as { score?: unknown };
   const legacyScore = typeof legacyRaw.score === 'number'
@@ -409,15 +495,14 @@ async function runValidate(
 }
 
 // ─── Activity 4: runRefine ────────────────────────────────────────
-// Mirrors ax-translator's refineTranslation — only the issues are sent
-// in the user content; the compiled retryContext (if any) goes into the
+// Mirrors the Bible's refine() — only the issues are sent
+// in the user content; the compiled fixContext (if any) goes into the
 // system prompt as DSPy guidance, not into the user content.
 
 async function runRefine(
   input: PipelineInput,
   copy: AdCopy,
   issues: string[],
-  errorHistory: ErrorEntry[],
   isRetry = false,
   retryContext = '',
   streaming?: StreamingCb,
@@ -442,10 +527,12 @@ async function runRefine(
     onLog: streaming?.onLog,
     onChunk: streaming?.onChunk ? (text) => streaming.onChunk!(text) : undefined,
   });
-  return parseLLMJson<AdCopy>(result.content);
+  return parseLLMJsonWithRecovery<AdCopy>(result.content);
 }
 
 // ─── runFastPipeline (intent → copy, no validate/refine) ───────────
+// Bible runFast pattern: generation stages wrapped in callWithRetryAwareness,
+// echo-retry on each, estimated score 0.85 (no validation step).
 
 async function runFastPipeline(input: PipelineInput): Promise<PipelineOutput> {
   const stages: StageLog[] = STAGE_ORDER.map((stage) => ({
@@ -455,26 +542,39 @@ async function runFastPipeline(input: PipelineInput): Promise<PipelineOutput> {
   }));
   const trace: string[] = ['fast-pipeline'];
   const tracker = makeAttemptTracker();
+  const errorHistory: ErrorEntry[] = [];
+  const onLogLine = (line: string) => { input.onLog?.(line); tracker.onLog(line); };
 
   setStage(stages, 'intent', 'running', '');
   let intentText: string;
   try {
-    intentText = await runIntent(input, false, '', {
-      onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
-      onChunk: (text) => input.onChunk?.(text, 'intent'),
-    });
+    intentText = await callWithRetryAwareness(
+      () => runIntent(input, false, '', {
+        onLog: onLogLine,
+        onChunk: (text) => input.onChunk?.(text, 'intent'),
+      }),
+      1,
+      'Intent',
+      'intent',
+      errorHistory,
+      input.onLog,
+    );
   } catch (err) {
-    return await handleFatal(err, 'intent', 1, stages, trace, [], 'fast');
+    return await handleFatal(err, 'intent', 1, stages, trace, errorHistory, 'fast');
   }
 
-  // Echo detection — retry once with the forceful prompt (no compilePrompt context).
+  // Echo detection — retry once with the forceful prompt (no compiled context).
   if (isEcho(input.product, intentText)) {
     trace.push('echo-detected', 'intent-retry');
     tracker.reset();
-    intentText = await runIntent(input, true, '', {
-      onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
-      onChunk: (text) => input.onChunk?.(text, 'intent'),
-    });
+    try {
+      intentText = await runIntent(input, true, '', {
+        onLog: onLogLine,
+        onChunk: (text) => input.onChunk?.(text, 'intent'),
+      });
+    } catch {
+      // Retry failed, use original result
+    }
   }
   setStage(stages, 'intent', 'done', intentText);
   trace.push('intent');
@@ -491,17 +591,28 @@ async function runFastPipeline(input: PipelineInput): Promise<PipelineOutput> {
   setStage(stages, 'copy', 'running', '');
   let copy: AdCopy;
   try {
-    copy = await runCopy(input, intentText, false, [], '', {
-      onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
-      onChunk: (text) => input.onChunk?.(text, 'copy'),
-    });
+    copy = await callWithRetryAwareness(
+      () => runCopy(input, intentText, false, [], '', {
+        onLog: onLogLine,
+        onChunk: (text) => input.onChunk?.(text, 'copy'),
+      }),
+      1,
+      'Copy',
+      'copy',
+      errorHistory,
+      input.onLog,
+    );
     if (isEcho(input.product, JSON.stringify(copy))) {
       trace.push('echo-detected', 'copy-retry');
       tracker.reset();
-      copy = await runCopy(input, intentText, true, [], '', {
-        onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
-        onChunk: (text) => input.onChunk?.(text, 'copy'),
-      });
+      try {
+        copy = await runCopy(input, intentText, true, [], '', {
+          onLog: onLogLine,
+          onChunk: (text) => input.onChunk?.(text, 'copy'),
+        });
+      } catch {
+        // Retry failed, use original result
+      }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -537,10 +648,14 @@ async function runFastPipeline(input: PipelineInput): Promise<PipelineOutput> {
 }
 
 // ─── runFullPipeline ──────────────────────────────────────────────
-// State machine, same shape as ax-translator's runTranslationPipeline:
-//   intent → copy → validate → (if !isValid) refine → revalidate → done
-// Branch on isValid (not on a numeric threshold). Validate-after-refine
-// requires isValid && !isEcho to exit. Max 2 refinements.
+// State machine ported word-to-word from the Bible's AXPipeline.run():
+//   intent → copy → validate → (if score < threshold) refine → revalidate → done
+// KEY FIX carried from the Bible: results are carried FORWARD between
+// stages, not re-computed. The loop condition is the Bible's exact shape:
+//   while (attempt < maxAttempts && score < threshold && resumeFrom !== 'done')
+// VALIDATION_THRESHOLD = 0.75; score is carried in the Bible's 0-1 domain
+// (converted from the validator's 0-100 qualityScore at the boundary).
+// PipelineOutput.score stays 0-1 — external UI contract unchanged.
 
 async function runFullPipeline(
   input: PipelineInput,
@@ -554,9 +669,16 @@ async function runFullPipeline(
   const trace: string[] = ['full-pipeline'];
   const tracker = makeAttemptTracker();
   const errorHistory: ErrorEntry[] = [];
+  const onLogLine = (line: string) => { input.onLog?.(line); tracker.onLog(line); };
+  const threshold = input.threshold ?? VALIDATION_THRESHOLD;
+  // Bible run(rawNotes, iterations, threshold): attempt 1 is the generation
+  // slot and each refine increments attempt, so maxAttempts = maxRefinements+1
+  // gives worst case maxRefinements+1 validates + maxRefinements refines
+  // (default: 3 validates + 2 refines — Bible MAX_ITERATIONS=3 equivalence).
+  const maxAttempts = maxRefinements + 1;
   let attempt = 0;
   let refinements = 0;
-  let qualityScore = 0;
+  let score = 0; // Bible 0-1 domain
   let lastNotes = '';
   let currentIssues: string[] = [];
   let copy: AdCopy = { headlines: [], descriptions: [] };
@@ -564,43 +686,51 @@ async function runFullPipeline(
   type Stage = 'intent' | 'copy' | 'validate' | 'refine' | 'done';
   let resumeFrom: Stage = 'intent';
 
-  // ── Stage 1: Intent ────────────────────────────────────────────
+  // ── Stage 1: Intent (runs once, result carried forward) ────────
   if (resumeFrom === 'intent') {
     attempt++;
     trace.push('intent');
     setStage(stages, 'intent', 'running', '');
     let intentText: string;
     try {
-      intentText = await runIntent(input, false, '', {
-        onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
-        onChunk: (text) => input.onChunk?.(text, 'intent'),
-      });
+      intentText = await callWithRetryAwareness(
+        () => runIntent(input, false, '', {
+          onLog: onLogLine,
+          onChunk: (text) => input.onChunk?.(text, 'intent'),
+        }),
+        attempt,
+        'Intent',
+        'intent',
+        errorHistory,
+        input.onLog,
+      );
+
+      // Echo detection (Bible verbatim pattern — retry with the forceful
+      // prompt at the SAME attempt number; if echo persists, validation
+      // and the echo guard will catch it).
+      if (isEcho(input.product, intentText)) {
+        console.log('[AX Pipeline] Echo detected in intent — retrying with forceful prompt');
+        trace.push('echo-detected', 'intent-retry');
+        tracker.reset();
+        try {
+          intentText = await runIntent(input, true, '', {
+            onLog: onLogLine,
+            onChunk: (text) => input.onChunk?.(text, 'intent'),
+          });
+          if (isEcho(input.product, intentText)) {
+            trace.push('echo-persist');
+          }
+        } catch {
+          // Retry failed, use original result
+        }
+      }
+
+      resumeFrom = 'copy';
     } catch (err) {
       return await handleFatal(err, 'intent', attempt, stages, trace, errorHistory, 'full');
     }
 
-    // Echo detection on the initial intent call — retry with forceful prompt.
-    // If echo persists, validation will catch it.
-    if (isEcho(input.product, intentText)) {
-      trace.push('echo-detected', 'intent-retry');
-      attempt++;
-      tracker.reset();
-      try {
-        intentText = await runIntent(input, true, '', {
-          onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
-          onChunk: (text) => input.onChunk?.(text, 'intent'),
-        });
-        if (isEcho(input.product, intentText)) {
-          trace.push('echo-persist');
-        }
-      } catch (err) {
-        return await handleFatal(err, 'intent', attempt, stages, trace, errorHistory, 'full');
-      }
-    }
-    setStage(stages, 'intent', 'done', intentText);
-    resumeFrom = 'copy';
-
-    // ── Stage 2: Copy ───────────────────────────────────────────
+    // ── Stage 2: Copy (runs once after intent, result carried) ────
     if (resumeFrom === 'copy') {
       // Adaptive cooldown (only if intent retried/failed).
       const prev = tracker.snapshot();
@@ -614,50 +744,50 @@ async function runFullPipeline(
       trace.push('copy');
       setStage(stages, 'copy', 'running', '');
       try {
-        copy = await runCopy(input, intentText, false, [], '', {
-          onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
-          onChunk: (text) => input.onChunk?.(text, 'copy'),
-        });
-        if (isEcho(intentText, JSON.stringify(copy))) {
-          trace.push('echo-detected', 'copy-retry');
-          attempt++;
-          tracker.reset();
-          copy = await runCopy(input, intentText, true, [], '', {
-            onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+        copy = await callWithRetryAwareness(
+          () => runCopy(input, intentText, false, [], '', {
+            onLog: onLogLine,
             onChunk: (text) => input.onChunk?.(text, 'copy'),
-          });
-        }
-      } catch (err) {
-        // Copy failed entirely — retry once with compilePrompt context (DSPy surgical fix).
-        const msg = err instanceof Error ? err.message : String(err);
-        errorHistory.push({ attempt, stage: 'copy', error: msg });
-        if (attempt < 2) {
-          attempt++;
-          trace.push('copy-retry');
-          const fixContext = compilePrompt(input, errorHistory, 'copy');
+          }),
+          attempt,
+          'Copy',
+          'copy',
+          errorHistory,
+          input.onLog,
+        );
+
+        // Echo detection (Bible verbatim pattern — same attempt number).
+        if (isEcho(intentText, JSON.stringify(copy))) {
+          console.log('[AX Pipeline] Echo detected in copy — retrying with forceful prompt');
+          trace.push('echo-detected', 'copy-retry');
+          tracker.reset();
           try {
-            copy = await runCopy(input, intentText, true, errorHistory, fixContext, {
-              onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+            copy = await runCopy(input, intentText, true, [], '', {
+              onLog: onLogLine,
               onChunk: (text) => input.onChunk?.(text, 'copy'),
             });
-          } catch (err2) {
-            const msg2 = err2 instanceof Error ? err2.message : String(err2);
-            errorHistory.push({ attempt, stage: 'copy', error: msg2 });
-            trace.push('copy-fail');
-            return {
-              ad: emptyAd(`Copy generation failed after retry: ${msg2}`),
-              stages,
-              pipeline: trace,
-              score: 0,
-              attempts: attempt,
-              refinements: 0,
-              mode: 'full',
-            };
+          } catch {
+            // Retry failed, use original result
           }
-        } else {
+        }
+      } catch (err) {
+        if (input.signal?.aborted) {
+          return await handleFatal(err, 'copy', attempt, stages, trace, errorHistory, 'full');
+        }
+        // Copy failed entirely — one DSPy surgical retry with compiled context.
+        trace.push('copy-retry');
+        const fixContext = compileRefinePrompt([], errorHistory, 'copy');
+        try {
+          copy = await runCopy(input, intentText, true, errorHistory, fixContext, {
+            onLog: onLogLine,
+            onChunk: (text) => input.onChunk?.(text, 'copy'),
+          });
+        } catch (err2) {
+          const msg2 = err2 instanceof Error ? err2.message : String(err2);
+          errorHistory.push({ attempt, stage: 'copy', error: msg2 });
           trace.push('copy-fail');
           return {
-            ad: emptyAd(`Copy generation failed: ${msg}`),
+            ad: emptyAd(`Copy generation failed after retry: ${msg2}`),
             stages,
             pipeline: trace,
             score: 0,
@@ -667,14 +797,17 @@ async function runFullPipeline(
           };
         }
       }
+      copy = normalizeCopy(copy);
       setStage(stages, 'copy', 'done', `${copy.headlines.length} headlines · ${copy.descriptions.length} descriptions`);
       resumeFrom = 'validate';
     }
   }
 
-  // ── Validate → Refine loop ─────────────────────────────────────
-  while ((resumeFrom as Stage) !== 'done' && refinements <= maxRefinements) {
-    // ── Stage 3: Validate ────────────────────────────────────────
+  // ─── Validate → Refine loop (Bible verbatim shape, results carried forward) ──
+  // This is the Bible's exact loop condition and stage progression.
+
+  while (attempt < maxAttempts && score < threshold && resumeFrom !== 'done') {
+    // ── Stage 3: VALIDATE ─────────────────────────────────────────
     if (resumeFrom === 'validate') {
       const prev = tracker.snapshot();
       if (prev.retried || !prev.succeeded) {
@@ -682,63 +815,89 @@ async function runFullPipeline(
         if (cd > 0) {
           try { await interStageCooldown(cd, input.onLog, 'validate', input.signal); }
           catch {
+            if (input.signal?.aborted) { resumeFrom = 'done'; break; }
             errorHistory.push({ attempt, stage: 'validate', error: 'aborted' });
             trace.push('validate-fail');
-            qualityScore = 60;
+            score = 0.7; // Bible fallback
             lastNotes = 'Validation aborted — using estimated score.';
+            currentIssues = [lastNotes];
             break;
           }
         }
       }
       tracker.reset();
 
-      trace.push('validate');
-      setStage(stages, 'validate', 'running', '');
+      // Cosmetic trace distinction only — the state machine itself is the
+      // Bible's unified validate stage (revalidate = validate again).
+      trace.push(refinements > 0 ? `revalidate-${refinements}` : 'validate');
+      setStage(stages, 'validate', 'running', refinements > 0 ? 'Re-validating after refinement…' : '');
       let report: ValidationReport;
       try {
-        report = await runValidate(input, copy, {
-          onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
-          onChunk: (text) => input.onChunk?.(text, 'validate'),
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        errorHistory.push({ attempt, stage: 'validate', error: msg });
+        report = await callWithRetryAwareness(
+          () => runValidate(input, copy, {
+            onLog: onLogLine,
+            onChunk: (text) => input.onChunk?.(text, 'validate'),
+          }),
+          attempt,
+          'Validate',
+          'validate',
+          errorHistory,
+          input.onLog,
+        );
+      } catch {
+        if (input.signal?.aborted) { resumeFrom = 'done'; break; }
+        console.warn('[AX Pipeline] Validate failed, using default score');
         trace.push('validate-fail');
-        qualityScore = 60;
+        score = 0.7; // Bible fallback
+        currentIssues = ['Validation step failed — using estimated score'];
         lastNotes = 'Validation step failed — using estimated score.';
-        break;
-      }
-
-      qualityScore = report.qualityScore;
-      currentIssues = report.issues;
-      lastNotes = report.notes;
-
-      // If validation caught an echo (copy is identical to source), force refinement.
-      const echoCaught = isEcho(input.product, JSON.stringify(copy));
-      if (echoCaught) {
-        trace.push('echo-caught-by-validation');
-        qualityScore = Math.min(qualityScore, 30);
-        currentIssues = [...currentIssues, 'Copy appears identical to the product description — not actual ad copy'];
-        setStage(stages, 'validate', 'done', `${qualityScore}/100 — echo detected, needs refinement`);
-        if (refinements >= maxRefinements) { resumeFrom = 'done'; break; }
-        resumeFrom = 'refine';
-        continue;
-      }
-
-      const passed = report.isValid;
-      setStage(stages, 'validate', 'done', `${qualityScore}/100 — ${passed ? 'passed' : 'needs work'}`);
-
-      if (passed) {
-        trace.push('validate-pass');
+        setStage(stages, 'validate', 'done', `${Math.round(score * 100)}/100 — estimated`);
+        // Bible flow: 0.7 < 0.75 → refine if budget allows, else done.
+        if (attempt < maxAttempts) {
+          resumeFrom = 'refine';
+          continue;
+        }
         resumeFrom = 'done';
         break;
       }
-      trace.push('validate-fail');
-      if (refinements >= maxRefinements) { resumeFrom = 'done'; break; }
-      resumeFrom = 'refine';
+
+      // Boundary mapping: validator speaks 0-100, the state machine carries
+      // the Bible's 0-1 score domain.
+      score = report.qualityScore / 100;
+      currentIssues = report.issues;
+      lastNotes = report.notes;
+
+      // Echo guard: if validation missed a copy that just echoes the product,
+      // force below threshold so the state machine refines
+      // (ax-translator lineage: score = Math.min(score, 0.30)).
+      if (isEcho(input.product, JSON.stringify(copy))) {
+        trace.push('echo-caught-by-validation');
+        score = Math.min(score, 0.30);
+        currentIssues = [...currentIssues, 'Copy appears identical to the product description — not actual ad copy'];
+      }
+
+      // Bible verbatim branch: passed = score >= threshold.
+      const passed = score >= threshold;
+      setStage(
+        stages,
+        'validate',
+        'done',
+        `${Math.round(score * 100)}/100 — ${passed ? (refinements > 0 ? 'passed revalidation' : 'passed') : 'needs work'}`,
+      );
+
+      if (passed) {
+        trace.push(refinements > 0 ? `revalidate-pass-${refinements}` : 'validate-pass');
+        resumeFrom = 'done';
+      } else if (attempt < maxAttempts) {
+        trace.push('validate-fail');
+        resumeFrom = 'refine';
+      } else {
+        trace.push('validate-fail');
+        resumeFrom = 'done';
+      }
     }
 
-    // ── Stage 4: Refine ─────────────────────────────────────────
+    // ── Stage 4: REFINE (DSPy-compiled prompt) ────────────────────
     if (resumeFrom === 'refine') {
       const prev = tracker.snapshot();
       if (prev.retried || !prev.succeeded) {
@@ -746,6 +905,7 @@ async function runFullPipeline(
         if (cd > 0) {
           try { await interStageCooldown(cd, input.onLog, 'refine', input.signal); }
           catch {
+            if (input.signal?.aborted) { resumeFrom = 'done'; break; }
             errorHistory.push({ attempt, stage: 'refine', error: 'aborted', issues: currentIssues });
             trace.push('refine-fail');
             resumeFrom = 'done';
@@ -760,80 +920,51 @@ async function runFullPipeline(
       trace.push(`refine-${refinements}`);
       setStage(stages, 'refine', 'running', '');
 
-      // Compile surgical fix context (DSPy) — past issues + previous errors.
-      const fixContext = compilePrompt(input, errorHistory, 'refine');
+      // Compile surgical fix context (DSPy) — Bible verbatim.
+      const fixContext = compileRefinePrompt(currentIssues, errorHistory, 'refine');
+
       let refined: AdCopy;
       try {
-        refined = await runRefine(input, copy, currentIssues, errorHistory, false, fixContext, {
-          onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
-          onChunk: (text) => input.onChunk?.(text, 'refine'),
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        errorHistory.push({ attempt, stage: 'refine', error: msg, issues: currentIssues });
+        refined = await callWithRetryAwareness(
+          () => runRefine(input, copy, currentIssues, false, fixContext, {
+            onLog: onLogLine,
+            onChunk: (text) => input.onChunk?.(text, 'refine'),
+          }),
+          attempt,
+          'Refine',
+          'refine',
+          errorHistory,
+          input.onLog,
+        );
+      } catch {
+        if (input.signal?.aborted) { resumeFrom = 'done'; break; }
+        console.warn('[AX Pipeline] Refine failed, keeping current result');
         trace.push('refine-fail');
-        // Keep current copy and try one more refinement if budget remains.
-        if (refinements >= maxRefinements) { resumeFrom = 'done'; break; }
-        resumeFrom = 'refine';
+        // Keep current result, loop back to validate (Bible verbatim).
+        resumeFrom = 'validate';
         continue;
       }
 
-      // Echo detection on refined output — retry once with forceful prompt.
+      // Echo detection on refined output — retry once with forceful prompt
+      // (Bible verbatim pattern — same attempt number).
       if (isEcho(JSON.stringify(copy), JSON.stringify(refined))) {
+        console.log('[AX Pipeline] Echo detected in refine — retrying with forceful prompt');
         trace.push('refine-echo', 'refine-retry');
-        attempt++;
         tracker.reset();
         try {
-          refined = await runRefine(input, copy, currentIssues, errorHistory, true, fixContext, {
-            onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
+          refined = await runRefine(input, copy, currentIssues, true, fixContext, {
+            onLog: onLogLine,
             onChunk: (text) => input.onChunk?.(text, 'refine'),
           });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          errorHistory.push({ attempt, stage: 'refine', error: msg, issues: currentIssues });
-          trace.push('refine-fail');
-          if (refinements >= maxRefinements) { resumeFrom = 'done'; break; }
-          resumeFrom = 'refine';
-          continue;
+        } catch {
+          // Retry failed, use original refined result
         }
       }
+
       copy = normalizeCopy(refined);
       setStage(stages, 'refine', 'done', `Refinement #${refinements} complete`);
 
-      // Revalidate (ax-translator's revalidate pattern).
-      trace.push(`revalidate-${refinements}`);
-      setStage(stages, 'validate', 'running', 'Re-validating after refinement…');
-      let revalidation: ValidationReport;
-      try {
-        revalidation = await runValidate(input, copy, {
-          onLog: (line) => { input.onLog?.(line); tracker.onLog(line); },
-          onChunk: (text) => input.onChunk?.(text, 'validate'),
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        errorHistory.push({ attempt, stage: 'validate', error: msg });
-        qualityScore = 65;
-        lastNotes = `Revalidation failed: ${msg}`;
-        trace.push(`revalidate-fail-${refinements}`);
-        resumeFrom = 'done';
-        break;
-      }
-      qualityScore = revalidation.qualityScore;
-      currentIssues = revalidation.issues;
-      lastNotes = revalidation.notes;
-
-      // Pass condition: isValid AND not echoing, exactly like ax-translator.
-      const stillEcho = isEcho(input.product, JSON.stringify(copy));
-      if (revalidation.isValid && !stillEcho) {
-        trace.push(`revalidate-pass-${refinements}`);
-        setStage(stages, 'validate', 'done', `${qualityScore}/100 — passed revalidation`);
-        resumeFrom = 'done';
-        break;
-      }
-      trace.push(`revalidate-fail-${refinements}`);
-      setStage(stages, 'validate', 'done', `${qualityScore}/100 — still needs work`);
-      if (refinements >= maxRefinements) { resumeFrom = 'done'; break; }
-      // Loop back to validate → refine again.
+      // After refine, loop back to validate (Bible verbatim).
       resumeFrom = 'validate';
     }
   }
@@ -841,13 +972,13 @@ async function runFullPipeline(
   const ad: AdResult = {
     headlines: copy.headlines,
     descriptions: copy.descriptions,
-    compliance: lastNotes || (qualityScore >= 70 ? 'All checks passed.' : 'Issues remain after refinement.'),
+    compliance: lastNotes || (score >= threshold ? 'All checks passed.' : 'Issues remain after refinement.'),
   };
   return {
     ad,
     stages,
     pipeline: trace,
-    score: qualityScore / 100, // surface as 0-1 for UI consistency
+    score, // already 0-1 — UI contract unchanged
     attempts: attempt,
     refinements,
     mode: 'full',
