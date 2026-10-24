@@ -18,14 +18,10 @@
  *   - recoverTruncatedJSON() — 3-layer truncation recovery chain
  *     (closeOpenBrackets → truncateToLastCompleteElement →
  *     recoverFieldsIndividually) via parseLLMJsonWithRecovery — Bible verbatim
- *   - resumeFrom state machine: deterministic stage progression, Bible shape
- *     `while (attempt < maxAttempts && score < threshold && resumeFrom !== 'done')`
- *     with VALIDATION_THRESHOLD = 0.75 (score carried in the Bible's 0-1 domain;
- *     PipelineOutput.score stays 0-1 so the UI contract is unchanged)
  *   - Activity-style discrete steps:
- *       intent → copy → validate → (if score < threshold) refine → revalidate → done
- *   - Stage-specific temperatures + dynamic max_tokens (validate fixed 1024,
- *     floor 2048, cap 8192 — Bible verbatim)
+ *       intent → copy — single direct pass (no validate/refine stage)
+ *   - Stage-specific temperatures + dynamic max_tokens (floor 2048, cap 8192
+ *     — Bible verbatim)
  *
  * Deliberate deviation (documented, same as the other ports): the per-call
  * transport retry stays in controlledStream.ts (3 attempts, 429-aware
@@ -34,9 +30,8 @@
  * responsive. callWithRetryAwareness above it provides the Bible's
  * error-awareness layer.
  *
- * Two modes:
- *   - fast: intent → copy, no validate/refine (Bible runFast: estimated 0.85)
- *   - full: full state machine with validate→refine loop
+ * Single mode (validate stage removed, as in ax-translator):
+ *   - intent → copy, no validate/refine (Bible runFast: estimated 0.85)
  */
 
 import { chatCompletion } from './llmClient';
@@ -48,11 +43,9 @@ import type {
   ChatMessage,
   PhaseStatus,
   PipelineInput,
-  PipelineMode,
   PipelineOutput,
   StageId,
   StageLog,
-  ValidationReport,
 } from './types';
 
 // ─── AX DSPy-style Error Tracking ──────────────────────────────────
@@ -316,72 +309,15 @@ Hard rules:
 Return ONLY this JSON shape:
 {"headlines":["","","","",""],"descriptions":["",""]}`;
 
-const VALIDATE_SYSTEM = `You are a Google Ads quality reviewer. Evaluate the provided ad copy and respond in JSON format.
-
-Evaluate on these criteria (weight: compliance & accuracy > character limits > tone fit > value clarity > distinctness):
-1. COMPLIANCE & ACCURACY: No misleading or unverifiable claims? Google Ads policy safe?
-2. CHARACTER LIMITS: Headlines <= 30 chars, descriptions <= 90 chars?
-3. TONE FIT: Does the copy match the requested brand tone?
-4. VALUE CLARITY: Does the copy communicate the product's value?
-5. DISTINCTNESS: Each item a distinct idea, no near-duplicates?
-
-Respond in this exact JSON format:
-{
-  "isValid": true,
-  "qualityScore": 85,
-  "notes": "short summary",
-  "issues": ["issue1", "issue2"],
-  "fixes": {
-    "headline_0": "corrected text",
-    "description_1": "corrected text"
-  }
-}
-
-Scoring (qualityScore 0-100):
-- 90-100: Production-ready, minor wording differences only
-- 75-89: Minor gaps
-- 50-74: Significant gaps
-- 0-49: Major problems
-
-Set isValid to true if the copy is good enough for production use, even
-if minor improvements are possible. Omit the "fixes" key when no fixes
-are needed.
-
-Be FAIR — good copy = high score. Don't invent reasons to lower it.
-Only list issues affecting COMPLIANCE, LIMITS, or QUALITY.`;
-
-const REFINE_SYSTEM = `You are a Google Ads copy refinement engine. Fix the identified issues while preserving what already works.
-Output ONLY the corrected ad copy in JSON, nothing else.
-
-CRITICAL OUTPUT RULES:
-- Always respond with valid JSON only. No markdown, no explanation, no code fences.
-- Every response must be a single valid JSON object parseable by JSON.parse().
-- Preserve good copy wording where accurate — only fix problems the issues list names.
-- Headline over 30 characters? SHORTEN it.
-- Description over 90 characters? SHORTEN it.
-- Misleading or unverifiable claim? Replace it with an accurate one.
-- No emojis. No excessive capitalization. No speculative additions.
-
-Return ONLY this JSON shape:
-{"headlines":["","","","",""],"descriptions":["",""]}`;
-
 // ─── Public entry point ────────────────────────────────────────────
 
-const STAGE_ORDER: ReadonlyArray<StageId> = ['intent', 'copy', 'validate', 'refine'];
-const DEFAULT_MAX_REFINEMENTS = 2;
-
-// Exports below are for smoke-test verification; runtime behavior unchanged.
-// Bible verbatim (ax-opencode-translator / ax-translator lineage):
-// score below this → refine. The score is carried in the Bible's 0-1 domain
-// internally; PipelineOutput.score keeps the same 0-1 domain (UI multiplies
-// by 100), so the external contract is unchanged.
-export const VALIDATION_THRESHOLD = 0.75;
+const STAGE_ORDER: ReadonlyArray<StageId> = ['intent', 'copy'];
 
 export async function runPipeline(input: PipelineInput): Promise<PipelineOutput> {
-  const mode: PipelineMode = input.mode ?? 'full';
-  const maxRefinements = input.maxRefinements ?? DEFAULT_MAX_REFINEMENTS;
-  if (mode === 'fast') return runFastPipeline(input);
-  return runFullPipeline(input, maxRefinements);
+  // Single direct pass: intent → copy. No validate/refine stage — every
+  // run streams straight through and the score is the Bible's estimated
+  // 0.85 (no validation step).
+  return runFastPipeline(input);
 }
 
 // ─── Activity 1: runIntent ────────────────────────────────────────
@@ -445,84 +381,6 @@ async function runCopy(
   const result = await chatCompletion(input.modelId, input.apiKey, messages, {
     temperature: STAGE_TEMPERATURES.copy,
     maxTokens: calculateMaxTokens(intentText, 'copy'),
-    signal: input.signal,
-    onLog: streaming?.onLog,
-    onChunk: streaming?.onChunk ? (text) => streaming.onChunk!(text) : undefined,
-  });
-  return parseLLMJsonWithRecovery<AdCopy>(result.content);
-}
-
-// ─── Activity 3: runValidate ──────────────────────────────────────
-// Returns isValid + qualityScore (0-100); the state machine compares
-// qualityScore/100 against VALIDATION_THRESHOLD — the Bible's exact
-// threshold branch (passed = score >= threshold).
-
-async function runValidate(
-  input: PipelineInput,
-  copy: AdCopy,
-  streaming?: StreamingCb,
-): Promise<ValidationReport> {
-  const messages: ChatMessage[] = [
-    { role: 'system', content: VALIDATE_SYSTEM },
-    {
-      role: 'user',
-      content: `Copy: ${JSON.stringify(copy)}\nProduct: ${input.product}\nAudience: ${input.audience || 'General'}\nTone: ${input.tone}`,
-    },
-  ];
-
-  const result = await chatCompletion(input.modelId, input.apiKey, messages, {
-    temperature: STAGE_TEMPERATURES.compliance ?? 0.1,
-    maxTokens: calculateMaxTokens('', 'validate'), // Returns 1024 for validate (Bible verbatim)
-    signal: input.signal,
-    onLog: streaming?.onLog,
-    onChunk: streaming?.onChunk ? (text) => streaming.onChunk!(text) : undefined,
-  });
-
-  // Bible chatJSON pattern: parseLLMJson first, then truncation recovery.
-  const parsed = parseLLMJsonWithRecovery<ValidationReport>(result.content);
-  // Tolerate legacy models that returned "score" (0-1) instead of "qualityScore" (0-100).
-  const legacyRaw = parsed as unknown as { score?: unknown };
-  const legacyScore = typeof legacyRaw.score === 'number'
-    ? Math.round(legacyRaw.score * 100)
-    : undefined;
-  return {
-    isValid: parsed.isValid ?? true,
-    qualityScore: clamp(parsed.qualityScore ?? legacyScore ?? 70, 0, 100),
-    notes: parsed.notes || '',
-    issues: Array.isArray(parsed.issues) ? parsed.issues : [],
-    fixes: parsed.fixes && typeof parsed.fixes === 'object' ? parsed.fixes : undefined,
-  };
-}
-
-// ─── Activity 4: runRefine ────────────────────────────────────────
-// Mirrors the Bible's refine() — only the issues are sent
-// in the user content; the compiled fixContext (if any) goes into the
-// system prompt as DSPy guidance, not into the user content.
-
-async function runRefine(
-  input: PipelineInput,
-  copy: AdCopy,
-  issues: string[],
-  isRetry = false,
-  retryContext = '',
-  streaming?: StreamingCb,
-): Promise<AdCopy> {
-  const baseSystem = `${REFINE_SYSTEM}${isRetry ? '\n\nCRITICAL: Return ONLY the JSON. No echo of the input copy.' : ''}`;
-  const system = retryContext ? `${baseSystem}\n\n${retryContext}` : baseSystem;
-
-  const messages: ChatMessage[] = [
-    { role: 'system', content: system },
-    {
-      role: 'user',
-      content:
-        `Issues found:\n${issues.map((i) => `- ${i}`).join('\n')}\n\n` +
-        `Current copy:\n${JSON.stringify(copy)}`,
-    },
-  ];
-
-  const result = await chatCompletion(input.modelId, input.apiKey, messages, {
-    temperature: 0.2,
-    maxTokens: calculateMaxTokens(JSON.stringify(copy), 'refine'),
     signal: input.signal,
     onLog: streaming?.onLog,
     onChunk: streaming?.onChunk ? (text) => streaming.onChunk!(text) : undefined,
@@ -647,344 +505,6 @@ async function runFastPipeline(input: PipelineInput): Promise<PipelineOutput> {
   };
 }
 
-// ─── runFullPipeline ──────────────────────────────────────────────
-// State machine ported word-to-word from the Bible's AXPipeline.run():
-//   intent → copy → validate → (if score < threshold) refine → revalidate → done
-// KEY FIX carried from the Bible: results are carried FORWARD between
-// stages, not re-computed. The loop condition is the Bible's exact shape:
-//   while (attempt < maxAttempts && score < threshold && resumeFrom !== 'done')
-// VALIDATION_THRESHOLD = 0.75; score is carried in the Bible's 0-1 domain
-// (converted from the validator's 0-100 qualityScore at the boundary).
-// PipelineOutput.score stays 0-1 — external UI contract unchanged.
-
-async function runFullPipeline(
-  input: PipelineInput,
-  maxRefinements: number,
-): Promise<PipelineOutput> {
-  const stages: StageLog[] = STAGE_ORDER.map((stage) => ({
-    stage,
-    status: 'idle' as PhaseStatus,
-    text: '',
-  }));
-  const trace: string[] = ['full-pipeline'];
-  const tracker = makeAttemptTracker();
-  const errorHistory: ErrorEntry[] = [];
-  const onLogLine = (line: string) => { input.onLog?.(line); tracker.onLog(line); };
-  const threshold = input.threshold ?? VALIDATION_THRESHOLD;
-  // Bible run(rawNotes, iterations, threshold): attempt 1 is the generation
-  // slot and each refine increments attempt, so maxAttempts = maxRefinements+1
-  // gives worst case maxRefinements+1 validates + maxRefinements refines
-  // (default: 3 validates + 2 refines — Bible MAX_ITERATIONS=3 equivalence).
-  const maxAttempts = maxRefinements + 1;
-  let attempt = 0;
-  let refinements = 0;
-  let score = 0; // Bible 0-1 domain
-  let lastNotes = '';
-  let currentIssues: string[] = [];
-  let copy: AdCopy = { headlines: [], descriptions: [] };
-
-  type Stage = 'intent' | 'copy' | 'validate' | 'refine' | 'done';
-  let resumeFrom: Stage = 'intent';
-
-  // ── Stage 1: Intent (runs once, result carried forward) ────────
-  if (resumeFrom === 'intent') {
-    attempt++;
-    trace.push('intent');
-    setStage(stages, 'intent', 'running', '');
-    let intentText: string;
-    try {
-      intentText = await callWithRetryAwareness(
-        () => runIntent(input, false, '', {
-          onLog: onLogLine,
-          onChunk: (text) => input.onChunk?.(text, 'intent'),
-        }),
-        attempt,
-        'Intent',
-        'intent',
-        errorHistory,
-        input.onLog,
-      );
-
-      // Echo detection (Bible verbatim pattern — retry with the forceful
-      // prompt at the SAME attempt number; if echo persists, validation
-      // and the echo guard will catch it).
-      if (isEcho(input.product, intentText)) {
-        console.log('[AX Pipeline] Echo detected in intent — retrying with forceful prompt');
-        trace.push('echo-detected', 'intent-retry');
-        tracker.reset();
-        try {
-          intentText = await runIntent(input, true, '', {
-            onLog: onLogLine,
-            onChunk: (text) => input.onChunk?.(text, 'intent'),
-          });
-          if (isEcho(input.product, intentText)) {
-            trace.push('echo-persist');
-          }
-        } catch {
-          // Retry failed, use original result
-        }
-      }
-
-      resumeFrom = 'copy';
-    } catch (err) {
-      return await handleFatal(err, 'intent', attempt, stages, trace, errorHistory, 'full');
-    }
-
-    // ── Stage 2: Copy (runs once after intent, result carried) ────
-    if (resumeFrom === 'copy') {
-      // Adaptive cooldown (only if intent retried/failed).
-      const prev = tracker.snapshot();
-      if (!prev.succeeded || prev.retried) {
-        const cd = adaptiveCooldownSec(input.modelId, prev.succeeded, prev.retried, prev.lastErrorMsg);
-        try { await interStageCooldown(cd, input.onLog, 'copy', input.signal); }
-        catch (err) { return await handleFatal(err, 'copy', attempt, stages, trace, errorHistory, 'full'); }
-      }
-      tracker.reset();
-
-      trace.push('copy');
-      setStage(stages, 'copy', 'running', '');
-      try {
-        copy = await callWithRetryAwareness(
-          () => runCopy(input, intentText, false, [], '', {
-            onLog: onLogLine,
-            onChunk: (text) => input.onChunk?.(text, 'copy'),
-          }),
-          attempt,
-          'Copy',
-          'copy',
-          errorHistory,
-          input.onLog,
-        );
-
-        // Echo detection (Bible verbatim pattern — same attempt number).
-        if (isEcho(intentText, JSON.stringify(copy))) {
-          console.log('[AX Pipeline] Echo detected in copy — retrying with forceful prompt');
-          trace.push('echo-detected', 'copy-retry');
-          tracker.reset();
-          try {
-            copy = await runCopy(input, intentText, true, [], '', {
-              onLog: onLogLine,
-              onChunk: (text) => input.onChunk?.(text, 'copy'),
-            });
-          } catch {
-            // Retry failed, use original result
-          }
-        }
-      } catch (err) {
-        if (input.signal?.aborted) {
-          return await handleFatal(err, 'copy', attempt, stages, trace, errorHistory, 'full');
-        }
-        // Copy failed entirely — one DSPy surgical retry with compiled context.
-        trace.push('copy-retry');
-        const fixContext = compileRefinePrompt([], errorHistory, 'copy');
-        try {
-          copy = await runCopy(input, intentText, true, errorHistory, fixContext, {
-            onLog: onLogLine,
-            onChunk: (text) => input.onChunk?.(text, 'copy'),
-          });
-        } catch (err2) {
-          const msg2 = err2 instanceof Error ? err2.message : String(err2);
-          errorHistory.push({ attempt, stage: 'copy', error: msg2 });
-          trace.push('copy-fail');
-          return {
-            ad: emptyAd(`Copy generation failed after retry: ${msg2}`),
-            stages,
-            pipeline: trace,
-            score: 0,
-            attempts: attempt,
-            refinements: 0,
-            mode: 'full',
-          };
-        }
-      }
-      copy = normalizeCopy(copy);
-      setStage(stages, 'copy', 'done', `${copy.headlines.length} headlines · ${copy.descriptions.length} descriptions`);
-      resumeFrom = 'validate';
-    }
-  }
-
-  // ─── Validate → Refine loop (Bible verbatim shape, results carried forward) ──
-  // This is the Bible's exact loop condition and stage progression.
-
-  while (attempt < maxAttempts && score < threshold && resumeFrom !== 'done') {
-    // ── Stage 3: VALIDATE ─────────────────────────────────────────
-    if (resumeFrom === 'validate') {
-      const prev = tracker.snapshot();
-      if (prev.retried || !prev.succeeded) {
-        const cd = adaptiveCooldownSec(input.modelId, prev.succeeded, prev.retried, prev.lastErrorMsg);
-        if (cd > 0) {
-          try { await interStageCooldown(cd, input.onLog, 'validate', input.signal); }
-          catch {
-            if (input.signal?.aborted) { resumeFrom = 'done'; break; }
-            errorHistory.push({ attempt, stage: 'validate', error: 'aborted' });
-            trace.push('validate-fail');
-            score = 0.7; // Bible fallback
-            lastNotes = 'Validation aborted — using estimated score.';
-            currentIssues = [lastNotes];
-            break;
-          }
-        }
-      }
-      tracker.reset();
-
-      // Cosmetic trace distinction only — the state machine itself is the
-      // Bible's unified validate stage (revalidate = validate again).
-      trace.push(refinements > 0 ? `revalidate-${refinements}` : 'validate');
-      setStage(stages, 'validate', 'running', refinements > 0 ? 'Re-validating after refinement…' : '');
-      let report: ValidationReport;
-      try {
-        report = await callWithRetryAwareness(
-          () => runValidate(input, copy, {
-            onLog: onLogLine,
-            onChunk: (text) => input.onChunk?.(text, 'validate'),
-          }),
-          attempt,
-          'Validate',
-          'validate',
-          errorHistory,
-          input.onLog,
-        );
-      } catch {
-        if (input.signal?.aborted) { resumeFrom = 'done'; break; }
-        console.warn('[AX Pipeline] Validate failed, using default score');
-        trace.push('validate-fail');
-        score = 0.7; // Bible fallback
-        currentIssues = ['Validation step failed — using estimated score'];
-        lastNotes = 'Validation step failed — using estimated score.';
-        setStage(stages, 'validate', 'done', `${Math.round(score * 100)}/100 — estimated`);
-        // Bible flow: 0.7 < 0.75 → refine if budget allows, else done.
-        if (attempt < maxAttempts) {
-          resumeFrom = 'refine';
-          continue;
-        }
-        resumeFrom = 'done';
-        break;
-      }
-
-      // Boundary mapping: validator speaks 0-100, the state machine carries
-      // the Bible's 0-1 score domain.
-      score = report.qualityScore / 100;
-      currentIssues = report.issues;
-      lastNotes = report.notes;
-
-      // Echo guard: if validation missed a copy that just echoes the product,
-      // force below threshold so the state machine refines
-      // (ax-translator lineage: score = Math.min(score, 0.30)).
-      if (isEcho(input.product, JSON.stringify(copy))) {
-        trace.push('echo-caught-by-validation');
-        score = Math.min(score, 0.30);
-        currentIssues = [...currentIssues, 'Copy appears identical to the product description — not actual ad copy'];
-      }
-
-      // Bible verbatim branch: passed = score >= threshold.
-      const passed = score >= threshold;
-      setStage(
-        stages,
-        'validate',
-        'done',
-        `${Math.round(score * 100)}/100 — ${passed ? (refinements > 0 ? 'passed revalidation' : 'passed') : 'needs work'}`,
-      );
-
-      if (passed) {
-        trace.push(refinements > 0 ? `revalidate-pass-${refinements}` : 'validate-pass');
-        resumeFrom = 'done';
-      } else if (attempt < maxAttempts) {
-        trace.push('validate-fail');
-        resumeFrom = 'refine';
-      } else {
-        trace.push('validate-fail');
-        resumeFrom = 'done';
-      }
-    }
-
-    // ── Stage 4: REFINE (DSPy-compiled prompt) ────────────────────
-    if (resumeFrom === 'refine') {
-      const prev = tracker.snapshot();
-      if (prev.retried || !prev.succeeded) {
-        const cd = adaptiveCooldownSec(input.modelId, prev.succeeded, prev.retried, prev.lastErrorMsg);
-        if (cd > 0) {
-          try { await interStageCooldown(cd, input.onLog, 'refine', input.signal); }
-          catch {
-            if (input.signal?.aborted) { resumeFrom = 'done'; break; }
-            errorHistory.push({ attempt, stage: 'refine', error: 'aborted', issues: currentIssues });
-            trace.push('refine-fail');
-            resumeFrom = 'done';
-            break;
-          }
-        }
-      }
-      tracker.reset();
-
-      refinements++;
-      attempt++;
-      trace.push(`refine-${refinements}`);
-      setStage(stages, 'refine', 'running', '');
-
-      // Compile surgical fix context (DSPy) — Bible verbatim.
-      const fixContext = compileRefinePrompt(currentIssues, errorHistory, 'refine');
-
-      let refined: AdCopy;
-      try {
-        refined = await callWithRetryAwareness(
-          () => runRefine(input, copy, currentIssues, false, fixContext, {
-            onLog: onLogLine,
-            onChunk: (text) => input.onChunk?.(text, 'refine'),
-          }),
-          attempt,
-          'Refine',
-          'refine',
-          errorHistory,
-          input.onLog,
-        );
-      } catch {
-        if (input.signal?.aborted) { resumeFrom = 'done'; break; }
-        console.warn('[AX Pipeline] Refine failed, keeping current result');
-        trace.push('refine-fail');
-        // Keep current result, loop back to validate (Bible verbatim).
-        resumeFrom = 'validate';
-        continue;
-      }
-
-      // Echo detection on refined output — retry once with forceful prompt
-      // (Bible verbatim pattern — same attempt number).
-      if (isEcho(JSON.stringify(copy), JSON.stringify(refined))) {
-        console.log('[AX Pipeline] Echo detected in refine — retrying with forceful prompt');
-        trace.push('refine-echo', 'refine-retry');
-        tracker.reset();
-        try {
-          refined = await runRefine(input, copy, currentIssues, true, fixContext, {
-            onLog: onLogLine,
-            onChunk: (text) => input.onChunk?.(text, 'refine'),
-          });
-        } catch {
-          // Retry failed, use original refined result
-        }
-      }
-
-      copy = normalizeCopy(refined);
-      setStage(stages, 'refine', 'done', `Refinement #${refinements} complete`);
-
-      // After refine, loop back to validate (Bible verbatim).
-      resumeFrom = 'validate';
-    }
-  }
-
-  const ad: AdResult = {
-    headlines: copy.headlines,
-    descriptions: copy.descriptions,
-    compliance: lastNotes || (score >= threshold ? 'All checks passed.' : 'Issues remain after refinement.'),
-  };
-  return {
-    ad,
-    stages,
-    pipeline: trace,
-    score, // already 0-1 — UI contract unchanged
-    attempts: attempt,
-    refinements,
-    mode: 'full',
-  };
-}
-
 // ─── Helpers ──────────────────────────────────────────────────────
 
 function setStage(stages: StageLog[], id: StageId, status: PhaseStatus, text: string): void {
@@ -1013,11 +533,6 @@ function ensureLength(arr: unknown, expected: number, label: string, charLimit: 
 
 function emptyAd(compliance: string): AdResult {
   return { headlines: [], descriptions: [], compliance };
-}
-
-function clamp(n: number, min: number, max: number): number {
-  if (typeof n !== 'number' || Number.isNaN(n)) return min;
-  return Math.min(max, Math.max(min, n));
 }
 
 async function handleFatal(

@@ -10,7 +10,6 @@ import type {
   AdResult,
   ModelId,
   PhaseStatus,
-  PipelineMode,
   StageId,
 } from '../lib/types';
 
@@ -23,8 +22,6 @@ const PHASES: ReadonlyArray<{
 }> = [
   { id: 'intent', num: '1', label: 'Strategic Intent Analysis', color: '#2563EB', bg: '#EFF6FF' },
   { id: 'copy', num: '2', label: 'Copy Generation', color: '#7C3AED', bg: '#F5F3FF' },
-  { id: 'validate', num: '3', label: 'Compliance & Quality Review', color: '#059669', bg: '#ECFDF5' },
-  { id: 'refine', num: '4', label: 'Refinement Loop', color: '#D97706', bg: '#FFFBEB' },
 ];
 
 const STORAGE_KEY = 'gas:config:v3';
@@ -32,22 +29,20 @@ const STORAGE_KEY = 'gas:config:v3';
 interface PersistedConfig {
   readonly modelId: ModelId;
   readonly apiKey: string;
-  readonly mode: PipelineMode;
 }
 
 function loadConfig(): PersistedConfig {
-  if (typeof window === 'undefined') return { modelId: DEFAULT_MODEL, apiKey: '', mode: 'full' };
+  if (typeof window === 'undefined') return { modelId: DEFAULT_MODEL, apiKey: '' };
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { modelId: DEFAULT_MODEL, apiKey: '', mode: 'full' };
+    if (!raw) return { modelId: DEFAULT_MODEL, apiKey: '' };
     const parsed = JSON.parse(raw) as Partial<PersistedConfig>;
     return {
       modelId: parsed.modelId === 'opencode-glm-5.3' ? 'opencode-glm-5.3' : DEFAULT_MODEL,
       apiKey: typeof parsed.apiKey === 'string' ? parsed.apiKey : '',
-      mode: parsed.mode === 'fast' ? 'fast' : 'full',
     };
   } catch {
-    return { modelId: DEFAULT_MODEL, apiKey: '', mode: 'full' };
+    return { modelId: DEFAULT_MODEL, apiKey: '' };
   }
 }
 
@@ -66,7 +61,6 @@ export default function Home() {
   const [apiKey, setApiKey] = useState<string>(initial.apiKey);
   const [apiKeyDraft, setApiKeyDraft] = useState<string>(initial.apiKey);
   const [keyCommitted, setKeyCommitted] = useState<boolean>(Boolean(initial.apiKey));
-  const [mode, setMode] = useState<PipelineMode>(initial.mode);
   const [product, setProduct] = useState('');
   const [audience, setAudience] = useState('');
   const [tone, setTone] = useState('professional');
@@ -89,22 +83,16 @@ export default function Home() {
   const [pipelineTrace, setPipelineTrace] = useState<ReadonlyArray<string>>([]);
   const [pipelineScore, setPipelineScore] = useState<number | null>(null);
   const [pipelineAttempts, setPipelineAttempts] = useState<number>(0);
-  const [pipelineRefinements, setPipelineRefinements] = useState<number>(0);
   const abortRef = useRef<AbortController | null>(null);
   const apiKeyInputRef = useRef<HTMLInputElement>(null);
 
   const persist = (next: Partial<PersistedConfig>) => {
-    saveConfig({ modelId: next.modelId ?? modelId, apiKey: next.apiKey ?? apiKey, mode: next.mode ?? mode });
+    saveConfig({ modelId: next.modelId ?? modelId, apiKey: next.apiKey ?? apiKey });
   };
 
   const handleModelChange = (id: ModelId) => {
     setModelId(id);
     persist({ modelId: id });
-  };
-
-  const handleModeChange = (m: PipelineMode) => {
-    setMode(m);
-    persist({ mode: m });
   };
 
   const commitApiKey = () => {
@@ -149,7 +137,6 @@ export default function Home() {
     setPipelineTrace([]);
     setPipelineScore(null);
     setPipelineAttempts(0);
-    setPipelineRefinements(0);
     setPhaseStatus({ intent: 'idle', copy: 'idle', validate: 'idle', refine: 'idle' });
     setPhaseText({ intent: '', copy: '', validate: '', refine: '' });
 
@@ -163,7 +150,6 @@ export default function Home() {
         product,
         audience,
         tone,
-        mode,
         signal: controller.signal,
         onStage: (log) => {
           setPhaseStatus((prev) => ({ ...prev, [log.stage]: log.status }));
@@ -185,7 +171,6 @@ export default function Home() {
       setPipelineTrace(result.pipeline);
       setPipelineScore(result.score);
       setPipelineAttempts(result.attempts);
-      setPipelineRefinements(result.refinements);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(`Error: ${msg}`);
@@ -212,7 +197,7 @@ export default function Home() {
         <header className="page-head">
           <h1>🎯 Google Ads AI Subagent</h1>
           <p>
-            AX DSPy-style pipeline: <strong>strategy → copy → validate → refine</strong>.
+            AX DSPy-style pipeline: <strong>strategy → copy</strong> — single direct pass, no validation stage.
             Pick a model, paste your key, describe the product.
           </p>
         </header>
@@ -231,24 +216,6 @@ export default function Home() {
 
         <section className="card">
           <div className="field-grid">
-            <div>
-              <label className="field-label" htmlFor="mode-select">
-                Pipeline mode
-              </label>
-              <select
-                id="mode-select"
-                value={mode}
-                onChange={(e) => handleModeChange(e.target.value as PipelineMode)}
-                className="field-input"
-              >
-                <option value="full">
-                  Full (intent → copy → validate → refine, up to 2 refinements)
-                </option>
-                <option value="fast">
-                  Fast (intent → copy, no validation)
-                </option>
-              </select>
-            </div>
             <div>
               <label className="field-label" htmlFor="tone">
                 Brand Tone
@@ -303,7 +270,7 @@ export default function Home() {
               disabled={running || !keyCommitted}
               className="btn btn-primary"
             >
-              {running ? 'Running pipeline…' : `Generate Ad Copy (${mode}) →`}
+              {running ? 'Running pipeline…' : 'Generate Ad Copy →'}
             </button>
           )}
         </section>
@@ -336,7 +303,6 @@ export default function Home() {
                 </span>
               )}
               <span className="trace-stat">attempts: {pipelineAttempts}</span>
-              <span className="trace-stat">refinements: {pipelineRefinements}</span>
             </div>
             <div className="trace-steps">
               {pipelineTrace.map((step, i) => (
