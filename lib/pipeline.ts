@@ -286,7 +286,20 @@ export async function callWithRetryAwareness<T>(
 // context is applied to the SYSTEM prompt only on retries — initial calls
 // keep the system prompt as-is.
 
-const INTENT_SYSTEM = `You are a strategic advertising analyst. Extract the core value propositions of a product and map them to user search intent.
+// ax-translator meta prompt structure (TRANSLATE_SYSTEM_PROMPT family):
+// semantic reasoning engine identity → what we do NOT do → what we surface /
+// infer → faithful-meaning quality bar → CRITICAL OUTPUT RULES.
+const INTENT_SYSTEM = `You are a semantic reasoning engine specialized in extracting advertising intent from product descriptions.
+You do NOT merely extract keywords — you REASON through the semantic space of the offer.
+You surface implicit value propositions the marketer already knows but didn't articulate.
+You infer missing connectives between product features and the search intent they satisfy.
+You follow the positioning embedded in the product description faithfully.
+
+CRITICAL OUTPUT RULES:
+- Output ONLY the analysis in the exact format below. No markdown fences, no explanation, no meta-commentary.
+- Preserve the marketer's original meaning faithfully.
+- Do NOT invent product claims, facts, or examples unless explicitly in the input.
+- Be CONCISE where the format demands compression.
 
 Output format (plain text, NOT JSON):
 - 3-4 core value propositions (each one short bullet)
@@ -296,15 +309,20 @@ Output format (plain text, NOT JSON):
 
 Be concise. Do NOT write ad copy yet — that comes in the next stage.`;
 
-const COPY_SYSTEM = `You are a Google Ads copywriter.
+// ax-translator meta prompt structure — copywriting domain.
+const COPY_SYSTEM = `You are a semantic reasoning engine specialized in writing Google Ads copy.
+You do NOT merely fill templates — you REASON through the persuasion space of the searcher's intent.
+You surface the strongest benefit angles the intent already implies.
+You infer the searcher's stage (awareness → consideration → action) and match the copy to it.
+You follow the brand tone and Google Ads constraints exactly.
 
-Hard rules:
+CRITICAL OUTPUT RULES:
+- Output ONLY the JSON object. No markdown fences, no explanation, no meta-commentary.
 - Each headline MUST be <= 30 characters.
 - Each description MUST be <= 90 characters.
-- You MUST return valid JSON, no markdown, no commentary, no code fences.
 - Provide exactly 5 headlines and 2 descriptions.
+- Preserve the intent's meaning faithfully — never invent claims.
 - No emojis. No excessive capitalization. No misleading superlatives.
-- Tone must match the requested brand tone.
 
 Return ONLY this JSON shape:
 {"headlines":["","","","",""],"descriptions":["",""]}`;
